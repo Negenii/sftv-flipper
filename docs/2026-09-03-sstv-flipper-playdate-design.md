@@ -176,7 +176,8 @@ runs everything and exits non-zero on failure.
     (Flipper timer rounding), expect all lines ok.
   - clock offset: modulate at 44 056 Hz (−0.1 %) but demodulate assuming 44 100,
     expect all lines ok.
-  - sample rate 8000 Hz loopback (proves the parametrisation; not used by any
+  - sample rate 22 050 Hz loopback (proves the parametrisation; 8 kHz is unusable because
+    4000 Hz sits at Nyquist; not used by any
     device today).
   - lost sync: cut the first 2 ms of one line's sync burst, expect that line
     missing and the following line intact.

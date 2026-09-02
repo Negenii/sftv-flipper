@@ -1,0 +1,10 @@
+.DS_Store
+*.pdx/
+*.wav
+dist/
+.vscode/
+__pycache__/
+build/
+*.o
+tests/bin/
+.ufbt/

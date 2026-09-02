@@ -1,0 +1,17 @@
+App(
+    appid="sstv_tx",
+    name="SSTV TX",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="sstv_app_main",
+    requires=["gui", "dialogs", "storage"],
+    stack_size=2 * 1024,
+    fap_category="Tools",
+    fap_version="0.1",
+    fap_description="Send a 400x240 image to a Playdate over sound",
+    fap_private_libs=[
+        Lib(
+            name="common",
+            sources=["crc8.c", "sstv_frame.c", "pbm.c"],
+        ),
+    ],
+)

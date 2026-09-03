@@ -11,6 +11,7 @@
 #include "pbm.h"
 #include "sstv_preview.h"
 #include "sstv_tx.h"
+#include "sstv_tx_icons.h"
 
 #define TAG "SstvTx"
 #define SSTV_DATA_DIR EXT_PATH("apps_data/sstv_tx")
@@ -98,12 +99,14 @@ static void led_stop(SstvApp* app) {
 
 /* ---- drawing ---- */
 
-/* The picture as an 80x48 sheet with a frame, centred above the status strip. As lines go
- * out the sheet slides up and leaves through the top edge, as if fed into a shredder; the
- * Playdate shows the same sheet coming in from its bottom edge. */
-#define SHEET_X 24
-#define SHEET_Y 2
-#define SHEET_BOTTOM 52 /* last screen row the sheet may use */
+/* Layout: the picture is an 80x48 sheet with a frame on the left; a panel on the right shows
+ * state, frame count and a vertical progress bar. As lines go out the sheet slides up and
+ * leaves through the top edge, as if fed into a shredder, uncovering a dolphin resting under
+ * a palm (the Playdate shows the same sheet coming in from its bottom edge). */
+#define SHEET_X 3
+#define SHEET_Y 8
+#define SHEET_BOTTOM 63
+#define PANEL_X 88
 
 static void hline_clipped(Canvas* canvas, int x0, int x1, int y) {
     if(y < 0 || y > SHEET_BOTTOM) return;
@@ -117,8 +120,23 @@ static void vline_clipped(Canvas* canvas, int x, int y0, int y1) {
     canvas_draw_line(canvas, x, y0, x, y1);
 }
 
+/* What lies under the sheet: the resting dolphin and a word. */
+static void draw_under_layer(Canvas* canvas) {
+    canvas_draw_icon(canvas, SHEET_X, SHEET_Y, &I_dolphin_done);
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str(canvas, SHEET_X + 3, SHEET_Y + 12, "Sent!");
+}
+
 static void draw_sheet(Canvas* canvas, const uint8_t* preview, int lines_done) {
     int y0 = SHEET_Y - lines_done * SSTV_PREVIEW_H / SSTV_HEIGHT; /* top row of the picture */
+    /* paper: white box (clipped) so it covers the layer underneath */
+    int top = y0 < 0 ? 0 : y0, bottom = y0 + SSTV_PREVIEW_H - 1;
+    if(bottom > SHEET_BOTTOM) bottom = SHEET_BOTTOM;
+    if(bottom >= top) {
+        canvas_set_color(canvas, ColorWhite);
+        canvas_draw_box(canvas, SHEET_X, top, SSTV_PREVIEW_W, bottom - top + 1);
+        canvas_set_color(canvas, ColorBlack);
+    }
     for(int py = 0; py < SSTV_PREVIEW_H; py++) {
         int y = y0 + py;
         if(y < 0 || y > SHEET_BOTTOM) continue;
@@ -134,34 +152,49 @@ static void draw_sheet(Canvas* canvas, const uint8_t* preview, int lines_done) {
     vline_clipped(canvas, SHEET_X + SSTV_PREVIEW_W, y0 - 1, y0 + SSTV_PREVIEW_H);
 }
 
+static void draw_panel(Canvas* canvas, SstvApp* app) {
+    char buf[16];
+    canvas_draw_line(canvas, PANEL_X - 3, 0, PANEL_X - 3, 63);
+    canvas_set_font(canvas, FontSecondary);
+    switch(app->state) {
+    case StatePreview:
+        canvas_draw_str(canvas, PANEL_X, 10, "Ready");
+        canvas_draw_str(canvas, PANEL_X, 44, "OK send");
+        canvas_draw_str(canvas, PANEL_X, 54, "Back");
+        canvas_draw_str(canvas, PANEL_X, 63, "files");
+        break;
+    case StateTransmit: {
+        canvas_draw_str(canvas, PANEL_X, 10, app->coded ? "TX zip" : "TX raw");
+        snprintf(buf, sizeof buf, "%u/%u", app->frames_sent, app->frames_total);
+        canvas_draw_str(canvas, PANEL_X, 20, buf);
+        /* vertical bar, same height as the sheet */
+        int bar_x = PANEL_X + 30, bar_h = SSTV_PREVIEW_H;
+        canvas_draw_frame(canvas, bar_x, SHEET_Y, 6, bar_h);
+        int fill = app->frames_total ? (int)((uint32_t)(bar_h - 2) * app->frames_sent / app->frames_total) : 0;
+        if(fill > 0) canvas_draw_box(canvas, bar_x + 1, SHEET_Y + 1, 4, fill);
+        snprintf(buf, sizeof buf, "%u lines", app->lines_done);
+        canvas_draw_str(canvas, PANEL_X, 32, buf);
+        canvas_draw_str(canvas, PANEL_X, 63, "Back stop");
+        break;
+    }
+    case StateDone:
+        canvas_draw_str(canvas, PANEL_X, 10, "Done");
+        snprintf(buf, sizeof buf, "%u fr", app->frames_total);
+        canvas_draw_str(canvas, PANEL_X, 20, buf);
+        canvas_draw_str(canvas, PANEL_X, 44, "OK again");
+        canvas_draw_str(canvas, PANEL_X, 54, "Back");
+        canvas_draw_str(canvas, PANEL_X, 63, "files");
+        break;
+    }
+}
+
 static void draw_callback(Canvas* canvas, void* ctx) {
     SstvApp* app = ctx;
     furi_mutex_acquire(app->mutex, FuriWaitForever);
     canvas_clear(canvas);
+    if(app->state != StatePreview) draw_under_layer(canvas);
     if(app->state != StateDone) draw_sheet(canvas, app->preview, app->state == StatePreview ? 0 : app->lines_done);
-
-    /* status strip */
-    canvas_set_color(canvas, ColorWhite);
-    canvas_draw_box(canvas, 0, 53, 128, 11);
-    canvas_set_color(canvas, ColorBlack);
-    canvas_draw_line(canvas, 0, 53, 127, 53);
-    canvas_set_font(canvas, FontSecondary);
-
-    char buf[32];
-    switch(app->state) {
-    case StatePreview:
-        canvas_draw_str(canvas, 2, 62, "OK: send   Back: files");
-        break;
-    case StateTransmit:
-        snprintf(buf, sizeof buf, "%s %u/%u", app->coded ? "TXc" : "TX", app->frames_sent, app->frames_total);
-        canvas_draw_str(canvas, 2, 62, buf);
-        elements_progress_bar(
-            canvas, 62, 55, 64, app->frames_total ? (float)app->frames_sent / app->frames_total : 0.0f);
-        break;
-    case StateDone:
-        canvas_draw_str(canvas, 2, 62, "Done.  OK: again   Back");
-        break;
-    }
+    draw_panel(canvas, app);
     furi_mutex_release(app->mutex);
 }
 

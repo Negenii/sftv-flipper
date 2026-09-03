@@ -36,6 +36,8 @@ typedef struct {
     uint16_t leader_left; /* leader symbols still to send (cycling tone 0,1,2,3) */
     int pending_line; /* physical frame whose last symbol was just programmed, -1 none */
     bool loop; /* restart from frame 0 after the last one */
+    volatile int playing; /* symbol now on the speaker (see sstv_tx_current_symbol) */
+    int queued; /* symbol programmed to start at the next update event */
     SstvTxCallback cb;
     void* ctx;
     bool running;
@@ -66,11 +68,13 @@ static inline void tone_settings(int v, uint32_t* arr, uint32_t* cycles, uint32_
 /* Advances the sequencer by one symbol and returns its PWM settings. */
 static void tx_next_symbol(uint32_t* arr, uint32_t* cycles, uint32_t* duty_pct) {
     *duty_pct = SSTV_SYNC_DUTY_PCT;
+    tx.queued = -1;
     switch(tx.phase) {
     case PhaseLeader:
         if(tx.leader_left > 0) {
             tx.leader_left--;
-            tone_settings(tx.leader_left % SSTV_NUM_TONES, arr, cycles, duty_pct);
+            tx.queued = tx.leader_left % SSTV_NUM_TONES;
+            tone_settings(tx.queued, arr, cycles, duty_pct);
             return;
         }
         tx.phase = PhaseSync;
@@ -82,7 +86,8 @@ static void tx_next_symbol(uint32_t* arr, uint32_t* cycles, uint32_t* duty_pct) 
         *cycles = CYCLES_SYNC;
         return;
     case PhaseBits:
-        tone_settings(sstv_frame_symbol(tx.frames + tx.line * SSTV_FRAME_BYTES, tx.symbol), arr, cycles, duty_pct);
+        tx.queued = sstv_frame_symbol(tx.frames + tx.line * SSTV_FRAME_BYTES, tx.symbol);
+        tone_settings(tx.queued, arr, cycles, duty_pct);
         tx.symbol++;
         if(tx.symbol >= SSTV_SYMBOLS_PER_FRAME) {
             tx.pending_line = tx.line;
@@ -116,6 +121,7 @@ static void tx_isr(void* context) {
     if(tx.phase == PhaseDone) return;
 
     /* A symbol has just started with the values we programmed last time; queue the next. */
+    tx.playing = tx.queued;
     uint32_t arr, cycles, duty;
     tx_next_symbol(&arr, &cycles, &duty);
     tx_program(arr, cycles, duty);
@@ -151,6 +157,7 @@ bool sstv_tx_start(const uint8_t* image_bits, bool loop, SstvTxCallback cb, void
     /* Symbol 0 goes straight into the active registers. */
     uint32_t arr0, cyc0, duty0;
     tx_next_symbol(&arr0, &cyc0, &duty0);
+    tx.playing = tx.queued;
 
     LL_TIM_InitTypeDef init = {0};
     init.Prescaler = 0;
@@ -196,6 +203,7 @@ void sstv_tx_stop(void) {
     LL_TIM_ClearFlag_UPDATE(TX_TIMER);
     furi_hal_interrupt_set_isr(FuriHalInterruptIdTim1UpTim16, NULL, NULL);
     tx.phase = PhaseDone;
+    tx.playing = -2;
     furi_hal_speaker_release(); /* stops the timer, disables the TIM16 bus, parks the pin */
     free(tx.frames);
     tx.frames = NULL;
@@ -204,4 +212,8 @@ void sstv_tx_stop(void) {
 
 bool sstv_tx_is_running(void) {
     return tx.running;
+}
+
+int sstv_tx_current_symbol(void) {
+    return tx.running ? tx.playing : -2;
 }

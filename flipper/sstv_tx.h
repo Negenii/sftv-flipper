@@ -15,3 +15,6 @@ bool sstv_tx_start(const uint8_t* image_bits, bool loop, SstvTxCallback cb, void
 void sstv_tx_stop(void);
 
 bool sstv_tx_is_running(void);
+
+/* Symbol currently on the speaker: 0..SSTV_NUM_TONES-1 data (0 = silence), -1 sync, -2 idle. */
+int sstv_tx_current_symbol(void);

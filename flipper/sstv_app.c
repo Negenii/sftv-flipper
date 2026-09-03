@@ -2,7 +2,6 @@
 #include <gui/gui.h>
 #include <gui/view_port.h>
 #include <gui/elements.h>
-#include <dialogs/dialogs.h>
 #include <storage/storage.h>
 #include <input/input.h>
 #include <furi_hal_light.h>
@@ -11,13 +10,17 @@
 #include "pbm.h"
 #include "sstv_preview.h"
 #include "sstv_tx.h"
-#include "sstv_tx_icons.h"
+#include "sftv_tx_icons.h"
 
-#define TAG "SstvTx"
-#define SSTV_DATA_DIR EXT_PATH("apps_data/sstv_tx")
+#define TAG "SftvTx"
+#define SSTV_DATA_DIR EXT_PATH("apps_data/sftv_tx")
+#define SSTV_OLD_DATA_DIR EXT_PATH("apps_data/sstv_tx") /* before the rename to SFTV */
 #define SSTV_FILE_MAX (SSTV_IMAGE_BYTES + 256)
+#define MAX_FILES 24
+#define TILES_PER_PAGE 3
 
 typedef enum {
+    StateBrowse, /* tile grid of the pictures on the card */
     StatePreview,
     StateTransmit,
     StateDone,
@@ -49,6 +52,12 @@ typedef struct {
     uint16_t lines_done; /* image lines already transmitted (progress) */
     bool coded;
     char name[32]; /* file name without directory, sent in the meta block */
+    /* picture browser */
+    Storage* storage;
+    char files[MAX_FILES][32];
+    uint8_t thumbs[MAX_FILES][SSTV_TINY_BYTES]; /* 40x20 tiles */
+    int file_count;
+    int file_index;
     FuriThread* led_thread; /* follows the symbol on the speaker while transmitting */
     volatile bool led_run;
 } SstvApp;
@@ -129,12 +138,13 @@ static void draw_under_layer(Canvas* canvas) {
     int bx = SHEET_X + 6, by = 1, bw = tw + 8, bh = 12;
     canvas_draw_rframe(canvas, bx, by, bw, bh, 3);
     canvas_draw_str(canvas, bx + 4, by + 9, text);
-    /* tail towards the dolphin */
+    /* tail towards the dolphin, who lies to the right */
+    int tx = bx + bw - 6;
     canvas_set_color(canvas, ColorWhite);
-    canvas_draw_line(canvas, bx + 5, by + bh - 1, bx + 9, by + bh - 1);
+    canvas_draw_line(canvas, tx - 4, by + bh - 1, tx, by + bh - 1);
     canvas_set_color(canvas, ColorBlack);
-    canvas_draw_line(canvas, bx + 5, by + bh - 1, bx + 3, by + bh + 3);
-    canvas_draw_line(canvas, bx + 10, by + bh - 1, bx + 3, by + bh + 3);
+    canvas_draw_line(canvas, tx - 5, by + bh - 1, tx + 2, by + bh + 3);
+    canvas_draw_line(canvas, tx + 1, by + bh - 1, tx + 2, by + bh + 3);
 }
 
 /* Top row of the picture. While the intro frames go out (START, previews, schedule) the sheet
@@ -186,6 +196,8 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
     canvas_draw_line(canvas, PANEL_X - 3, 0, PANEL_X - 3, 63);
     canvas_set_font(canvas, FontSecondary);
     switch(app->state) {
+    case StateBrowse:
+        break;
     case StatePreview:
         canvas_draw_str(canvas, PANEL_X, 9, "Ready");
         hint(canvas, &I_Ok_btn_9x9, 9, "send", 52);
@@ -216,10 +228,66 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
     }
 }
 
+/* Fits `name` into `max_w` pixels, ending in ".." when cut. */
+static void fit_name(Canvas* canvas, char* out, size_t cap, const char* name, int max_w) {
+    strncpy(out, name, cap - 1);
+    out[cap - 1] = 0;
+    char* dot = strrchr(out, '.');
+    if(dot && dot != out) *dot = 0;
+    if((int)canvas_string_width(canvas, out) <= max_w) return;
+    size_t n = strlen(out);
+    while(n > 1) {
+        n--;
+        out[n] = 0;
+        strcat(out, "..");
+        if((int)canvas_string_width(canvas, out) <= max_w) return;
+        out[n] = 0;
+    }
+}
+
+/* Tile grid: three 40x20 thumbnails per page, name under each, cursor as a double frame. */
+static void draw_browse(Canvas* canvas, SstvApp* app) {
+    char buf[32];
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str(canvas, 2, 10, "SFTV");
+    canvas_set_font(canvas, FontSecondary);
+    if(app->file_count == 0) {
+        canvas_draw_str(canvas, 2, 30, "No pictures. Put 400x240");
+        canvas_draw_str(canvas, 2, 40, "P4 .pbm files into");
+        canvas_draw_str(canvas, 2, 50, "apps_data/sftv_tx");
+        return;
+    }
+    snprintf(buf, sizeof buf, "%d/%d", app->file_index + 1, app->file_count);
+    canvas_draw_str(canvas, 126 - canvas_string_width(canvas, buf), 10, buf);
+    int page = app->file_index / TILES_PER_PAGE * TILES_PER_PAGE;
+    for(int k = 0; k < TILES_PER_PAGE; k++) {
+        int idx = page + k;
+        if(idx >= app->file_count) break;
+        int x = 3 + k * 42, y = 17; /* picture origin; frame one pixel outside */
+        const uint8_t* t = app->thumbs[idx];
+        for(int py = 0; py < SSTV_TINY_H; py++)
+            for(int px = 0; px < SSTV_TINY_W; px++)
+                if(t[py * SSTV_TINY_LINE_BYTES + (px >> 3)] & (0x80 >> (px & 7))) canvas_draw_dot(canvas, x + px, y + py);
+        canvas_draw_frame(canvas, x - 1, y - 1, SSTV_TINY_W + 2, SSTV_TINY_H + 2);
+        if(idx == app->file_index) canvas_draw_rframe(canvas, x - 3, y - 3, SSTV_TINY_W + 6, SSTV_TINY_H + 6, 2);
+        fit_name(canvas, buf, sizeof buf, app->files[idx], SSTV_TINY_W + 2);
+        canvas_draw_str(canvas, x + (SSTV_TINY_W - (int)canvas_string_width(canvas, buf)) / 2, y + SSTV_TINY_H + 12, buf);
+    }
+    canvas_draw_icon(canvas, 2, 54, &I_Ok_btn_9x9);
+    canvas_draw_str(canvas, 14, 62, "open");
+    canvas_draw_icon(canvas, 46, 53, &I_back_10px);
+    canvas_draw_str(canvas, 58, 62, "exit");
+}
+
 static void draw_callback(Canvas* canvas, void* ctx) {
     SstvApp* app = ctx;
     furi_mutex_acquire(app->mutex, FuriWaitForever);
     canvas_clear(canvas);
+    if(app->state == StateBrowse) {
+        draw_browse(canvas, app);
+        furi_mutex_release(app->mutex);
+        return;
+    }
     /* the layer underneath appears once the sheet is flush with the top edge */
     if(app->state == StateDone || (app->state == StateTransmit && app->frames_sent >= intro_frames(app))) draw_under_layer(canvas);
     if(app->state != StateDone) draw_sheet(canvas, app->preview, sheet_top(app));
@@ -268,13 +336,57 @@ static bool load_pbm(Storage* storage, const char* path, uint8_t* image) {
     return ok;
 }
 
-static void show_error(DialogsApp* dialogs, const char* text) {
-    DialogMessage* msg = dialog_message_alloc();
-    dialog_message_set_header(msg, "SSTV TX", 64, 2, AlignCenter, AlignTop);
-    dialog_message_set_text(msg, text, 64, 32, AlignCenter, AlignCenter);
-    dialog_message_set_buttons(msg, NULL, "OK", NULL);
-    dialog_message_show(dialogs, msg);
-    dialog_message_free(msg);
+/* Lists the .pbm files in the data directory and builds a 40x20 tile for each. */
+static void scan_files(SstvApp* app) {
+    app->file_count = 0;
+    File* dir = storage_file_alloc(app->storage);
+    if(storage_dir_open(dir, SSTV_DATA_DIR)) {
+        FileInfo info;
+        char name[64];
+        while(app->file_count < MAX_FILES && storage_dir_read(dir, &info, name, sizeof name)) {
+            if(info.flags & FSF_DIRECTORY) continue;
+            size_t n = strlen(name);
+            if(n < 5 || strcasecmp(name + n - 4, ".pbm") != 0) continue;
+            strncpy(app->files[app->file_count], name, sizeof(app->files[0]) - 1);
+            app->files[app->file_count][sizeof(app->files[0]) - 1] = 0;
+            app->file_count++;
+        }
+    }
+    storage_dir_close(dir);
+    storage_file_free(dir);
+    /* sort by name so the order is stable */
+    for(int i = 1; i < app->file_count; i++)
+        for(int j = i; j > 0 && strcmp(app->files[j - 1], app->files[j]) > 0; j--) {
+            char tmp[32];
+            memcpy(tmp, app->files[j], 32);
+            memcpy(app->files[j], app->files[j - 1], 32);
+            memcpy(app->files[j - 1], tmp, 32);
+        }
+    FuriString* path = furi_string_alloc();
+    for(int i = 0; i < app->file_count; i++) {
+        furi_string_printf(path, "%s/%s", SSTV_DATA_DIR, app->files[i]);
+        if(load_pbm(app->storage, furi_string_get_cstr(path), app->image)) {
+            sstv_preview_make_tiny(app->image, app->thumbs[i]);
+        } else {
+            memset(app->thumbs[i], 0x55, SSTV_TINY_BYTES); /* unreadable: grey tile */
+        }
+    }
+    furi_string_free(path);
+    if(app->file_index >= app->file_count) app->file_index = 0;
+}
+
+/* Loads the selected picture for the preview screen. */
+static bool open_file(SstvApp* app) {
+    if(app->file_index < 0 || app->file_index >= app->file_count) return false;
+    furi_string_printf(app->path, "%s/%s", SSTV_DATA_DIR, app->files[app->file_index]);
+    if(!load_pbm(app->storage, furi_string_get_cstr(app->path), app->image)) return false;
+    sstv_preview_make(app->image, app->preview);
+    /* file name without directory or extension, sent to the receiver in the meta block */
+    strncpy(app->name, app->files[app->file_index], sizeof(app->name) - 1);
+    app->name[sizeof(app->name) - 1] = 0;
+    char* dot = strrchr(app->name, '.');
+    if(dot && dot != app->name) *dot = 0;
+    return true;
 }
 
 /* ---- main viewport loop; returns when the user leaves to the file browser ---- */
@@ -307,7 +419,7 @@ static void start_tx(SstvApp* app) {
 }
 
 static void run_viewport(SstvApp* app) {
-    set_state(app, StatePreview);
+    set_state(app, StateBrowse);
     gui_add_view_port(app->gui, app->vp, GuiLayerFullscreen);
 
     bool leave = false;
@@ -327,13 +439,29 @@ static void run_viewport(SstvApp* app) {
             set_state(app, StateDone);
             break;
         case EvInput:
+            if(ev.input.type != InputTypeShort && ev.input.type != InputTypeRepeat) break;
+            if(app->state == StateBrowse) {
+                furi_mutex_acquire(app->mutex, FuriWaitForever);
+                int n = app->file_count;
+                if(n > 0) {
+                    if(ev.input.key == InputKeyRight) app->file_index = (app->file_index + 1) % n;
+                    if(ev.input.key == InputKeyLeft) app->file_index = (app->file_index + n - 1) % n;
+                    if(ev.input.key == InputKeyDown) app->file_index = (app->file_index + TILES_PER_PAGE) % n;
+                    if(ev.input.key == InputKeyUp) app->file_index = (app->file_index + n - TILES_PER_PAGE % n) % n;
+                }
+                furi_mutex_release(app->mutex);
+                if(ev.input.key == InputKeyBack && ev.input.type == InputTypeShort) leave = true;
+                if(ev.input.key == InputKeyOk && ev.input.type == InputTypeShort && open_file(app)) set_state(app, StatePreview);
+                view_port_update(app->vp);
+                break;
+            }
             if(ev.input.type != InputTypeShort) break;
             if(ev.input.key == InputKeyBack) {
                 if(app->state == StateTransmit || app->state == StateDone) {
                     sstv_tx_stop();
                     set_state(app, StatePreview);
                 } else {
-                    leave = true;
+                    set_state(app, StateBrowse);
                 }
             } else if(ev.input.key == InputKeyOk) {
                 if(app->state == StatePreview || app->state == StateDone) start_tx(app);
@@ -345,7 +473,7 @@ static void run_viewport(SstvApp* app) {
     gui_remove_view_port(app->gui, app->vp);
 }
 
-int32_t sstv_app_main(void* p) {
+int32_t sftv_app_main(void* p) {
     UNUSED(p);
     SstvApp* app = malloc(sizeof(SstvApp));
     memset(app, 0, sizeof *app);
@@ -358,35 +486,17 @@ int32_t sstv_app_main(void* p) {
     view_port_draw_callback_set(app->vp, draw_callback, app);
     view_port_input_callback_set(app->vp, input_callback, app);
 
-    Storage* storage = furi_record_open(RECORD_STORAGE);
-    storage_simply_mkdir(storage, SSTV_DATA_DIR);
-    DialogsApp* dialogs = furi_record_open(RECORD_DIALOGS);
-
-    while(true) {
-        DialogsFileBrowserOptions opts;
-        dialog_file_browser_set_basic_options(&opts, ".pbm", NULL);
-        opts.base_path = SSTV_DATA_DIR;
-        furi_string_set(app->path, SSTV_DATA_DIR);
-        if(!dialog_file_browser_show(dialogs, app->path, app->path, &opts)) break;
-        if(!load_pbm(storage, furi_string_get_cstr(app->path), app->image)) {
-            show_error(dialogs, "Need a P4 .pbm\nexactly 400x240");
-            continue;
-        }
-        sstv_preview_make(app->image, app->preview);
-        {
-            /* file name without directory, sent to the receiver in the meta block */
-            const char* full = furi_string_get_cstr(app->path);
-            const char* base = strrchr(full, '/');
-            base = base ? base + 1 : full;
-            strncpy(app->name, base, sizeof(app->name) - 1);
-            app->name[sizeof(app->name) - 1] = 0;
-            char* dot = strrchr(app->name, '.');
-            if(dot && dot != app->name) *dot = 0; /* extension is implied (.pbm) */
-        }
-        run_viewport(app);
+    app->storage = furi_record_open(RECORD_STORAGE);
+    /* the app used to be called SSTV: carry the pictures over */
+    FileInfo info;
+    if(storage_common_stat(app->storage, SSTV_OLD_DATA_DIR, &info) == FSE_OK &&
+       storage_common_stat(app->storage, SSTV_DATA_DIR, &info) != FSE_OK) {
+        storage_common_rename(app->storage, SSTV_OLD_DATA_DIR, SSTV_DATA_DIR);
     }
+    storage_simply_mkdir(app->storage, SSTV_DATA_DIR);
+    scan_files(app);
+    run_viewport(app);
 
-    furi_record_close(RECORD_DIALOGS);
     furi_record_close(RECORD_STORAGE);
     view_port_free(app->vp);
     furi_record_close(RECORD_GUI);

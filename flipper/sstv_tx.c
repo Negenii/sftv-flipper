@@ -39,6 +39,8 @@ typedef struct {
     uint16_t leader_left; /* leader symbols still to send (cycling tone 0,1,2,3) */
     int pending_line; /* physical frame whose last symbol was just programmed, -1 none */
     bool loop; /* restart from frame 0 after the last one */
+    bool test; /* tone test: symbols from test_pattern with test_tone_hz instead of frames */
+    uint8_t test_pattern[SSTV_SYMBOLS_PER_FRAME];
     volatile int playing; /* symbol now on the speaker (see sstv_tx_current_symbol) */
     int queued; /* symbol programmed to start at the next update event */
     SstvTxCallback cb;
@@ -68,6 +70,32 @@ static inline void tone_settings(int v, uint32_t* arr, uint32_t* cycles, uint32_
     *duty_pct = (uint32_t)tone_duty[v];
 }
 
+/* Tone test: the six test values and their PWM duty (same pre-emphasis idea as the data
+ * tones: louder duty for the weak high tones). */
+static const int test_tone_hz[SSTV_TEST_TONES] = {0, 2500, 3000, 3500, 4000, 4500};
+static const int test_tone_duty[SSTV_TEST_TONES] = {0, 12, 12, 30, 50, 50};
+
+static inline void test_tone_settings(int v, uint32_t* arr, uint32_t* cycles, uint32_t* duty_pct) {
+    if(test_tone_hz[v] == 0) {
+        *arr = ARR_FOR(3000);
+        *cycles = CYCLES_FOR(3000, SSTV_SYMBOL_US);
+        *duty_pct = 0;
+        return;
+    }
+    *arr = ARR_FOR(test_tone_hz[v]);
+    *cycles = CYCLES_FOR(test_tone_hz[v], SSTV_SYMBOL_US);
+    *duty_pct = (uint32_t)test_tone_duty[v];
+}
+
+/* Fixed pseudo-random symbol order (LCG, seed 1), reproduced by the analysis script. */
+static void test_pattern_fill(uint8_t* out) {
+    uint32_t x = 1;
+    for(int i = 0; i < SSTV_SYMBOLS_PER_FRAME; i++) {
+        x = (x * 1103515245u + 12345u) & 0x7fffffffu;
+        out[i] = (uint8_t)((x >> 16) % SSTV_TEST_TONES);
+    }
+}
+
 /* Advances the sequencer by one symbol and returns its PWM settings. */
 static void tx_next_symbol(uint32_t* arr, uint32_t* cycles, uint32_t* duty_pct) {
     *duty_pct = SSTV_SYNC_DUTY_PCT;
@@ -89,8 +117,13 @@ static void tx_next_symbol(uint32_t* arr, uint32_t* cycles, uint32_t* duty_pct) 
         *cycles = CYCLES_SYNC;
         return;
     case PhaseBits:
-        tx.queued = sstv_frame_symbol(tx.frames + tx.line * SSTV_FRAME_BYTES, tx.symbol);
-        tone_settings(tx.queued, arr, cycles, duty_pct);
+        if(tx.test) {
+            tx.queued = tx.test_pattern[tx.symbol];
+            test_tone_settings(tx.queued, arr, cycles, duty_pct);
+        } else {
+            tx.queued = sstv_frame_symbol(tx.frames + tx.line * SSTV_FRAME_BYTES, tx.symbol);
+            tone_settings(tx.queued, arr, cycles, duty_pct);
+        }
         tx.symbol++;
         if(tx.symbol >= SSTV_SYMBOLS_PER_FRAME) {
             tx.pending_line = tx.line;
@@ -142,21 +175,15 @@ static void tx_isr(void* context) {
     }
 }
 
-bool sstv_tx_start(const uint8_t* image_bits, const char* name, bool loop, SstvTxCallback cb, void* ctx) {
-    if(tx.running) return false;
-    if(!furi_hal_speaker_acquire(1000)) return false;
-
-    tx.frames = malloc(SSTV_MAX_FRAMES * SSTV_FRAME_BYTES);
-    tx.lines_after = malloc(SSTV_MAX_FRAMES);
-    tx.total = (uint16_t)sstv_build_physical(image_bits, name, tx.frames, tx.lines_after, &tx.coded);
-    tx.loop = loop;
+/* Programs the timer and starts the sequencer; tx.frames/total/loop/test are set. */
+static bool tx_run(bool leader, SstvTxCallback cb, void* ctx) {
     tx.cb = cb;
     tx.ctx = ctx;
     tx.line = 0;
     tx.symbol = 0;
     tx.pending_line = -1;
     tx.phase = PhaseLeader;
-    tx.leader_left = SSTV_LEADER_SYMBOLS;
+    tx.leader_left = leader ? SSTV_LEADER_SYMBOLS : 0;
 
     /* Symbol 0 goes straight into the active registers. */
     uint32_t arr0, cyc0, duty0;
@@ -197,6 +224,30 @@ bool sstv_tx_start(const uint8_t* image_bits, const char* name, bool loop, SstvT
 
     tx.running = true;
     return true;
+}
+
+bool sstv_tx_start(const uint8_t* image_bits, const char* name, bool loop, SstvTxCallback cb, void* ctx) {
+    if(tx.running) return false;
+    if(!furi_hal_speaker_acquire(1000)) return false;
+    tx.frames = malloc(SSTV_MAX_FRAMES * SSTV_FRAME_BYTES);
+    tx.lines_after = malloc(SSTV_MAX_FRAMES);
+    tx.total = (uint16_t)sstv_build_physical(image_bits, name, tx.frames, tx.lines_after, &tx.coded);
+    tx.loop = loop;
+    tx.test = false;
+    return tx_run(true, cb, ctx);
+}
+
+bool sstv_tx_start_test(SstvTxCallback cb, void* ctx) {
+    if(tx.running) return false;
+    if(!furi_hal_speaker_acquire(1000)) return false;
+    tx.frames = NULL;
+    tx.lines_after = NULL;
+    tx.total = 0xFFFF; /* never "done"; loops until stopped */
+    tx.loop = true;
+    tx.coded = false;
+    tx.test = true;
+    test_pattern_fill(tx.test_pattern);
+    return tx_run(false, cb, ctx);
 }
 
 void sstv_tx_stop(void) {

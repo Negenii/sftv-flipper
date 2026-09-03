@@ -24,6 +24,7 @@ typedef enum {
     StatePreview,
     StateTransmit,
     StateDone,
+    StateTest, /* temporary tone test (hold Up in the browser), Back stops */
 } AppState;
 
 typedef enum {
@@ -82,7 +83,7 @@ static int32_t led_thread_fn(void* ctx) {
                 static const uint8_t level[SSTV_NUM_TONES] = {0, 0x40, 0x90, 0xFF};
                 furi_hal_light_set(LightRed, 0);
                 furi_hal_light_set(LightGreen, 0);
-                furi_hal_light_set(LightBlue, level[sym]);
+                furi_hal_light_set(LightBlue, sym < SSTV_NUM_TONES ? level[sym] : 0xFF);
             }
         }
         furi_delay_ms(2);
@@ -197,6 +198,7 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
     canvas_set_font(canvas, FontSecondary);
     switch(app->state) {
     case StateBrowse:
+    case StateTest:
         break;
     case StatePreview:
         canvas_draw_str(canvas, PANEL_X, 9, "Ready");
@@ -283,6 +285,7 @@ static void draw_browse(Canvas* canvas, SstvApp* app) {
     canvas_draw_str(canvas, 14, 62, "open");
     canvas_draw_icon(canvas, 44, 53, &I_back_10px);
     canvas_draw_str(canvas, 56, 62, "exit");
+    canvas_draw_str(canvas, 76, 62, "hold^ test");
     snprintf(buf, sizeof buf, "%d/%d", app->file_index + 1, app->file_count);
     canvas_draw_str(canvas, 126 - canvas_string_width(canvas, buf), 62, buf);
 }
@@ -293,6 +296,17 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     canvas_clear(canvas);
     if(app->state == StateBrowse) {
         draw_browse(canvas, app);
+        furi_mutex_release(app->mutex);
+        return;
+    }
+    if(app->state == StateTest) {
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 2, 12, "Tone test");
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str(canvas, 2, 26, "sync + 164 x 4 ms symbols:");
+        canvas_draw_str(canvas, 2, 36, "silence 2500 3000 3500");
+        canvas_draw_str(canvas, 2, 46, "4000 4500 Hz, looping");
+        hint(canvas, &I_back_10px, 10, "stop", 63);
         furi_mutex_release(app->mutex);
         return;
     }
@@ -407,7 +421,7 @@ static void set_state(SstvApp* app, AppState s) {
         app->lines_done = 0;
     }
     furi_mutex_release(app->mutex);
-    if(s == StateTransmit) {
+    if(s == StateTransmit || s == StateTest) {
         led_start(app);
     } else {
         led_stop(app);
@@ -421,6 +435,14 @@ static void start_tx(SstvApp* app) {
         app->coded = sstv_tx_is_coded();
         app->lines_done = 0;
         set_state(app, StateTransmit);
+    } else {
+        FURI_LOG_E(TAG, "speaker busy");
+    }
+}
+
+static void start_test(SstvApp* app) {
+    if(sstv_tx_start_test(tx_callback, app)) {
+        set_state(app, StateTest);
     } else {
         FURI_LOG_E(TAG, "speaker busy");
     }
@@ -447,6 +469,10 @@ static void run_viewport(SstvApp* app) {
             set_state(app, StateDone);
             break;
         case EvInput:
+            if(app->state == StateBrowse && ev.input.type == InputTypeLong && ev.input.key == InputKeyUp) {
+                start_test(app);
+                break;
+            }
             if(ev.input.type != InputTypeShort && ev.input.type != InputTypeRepeat) break;
             if(app->state == StateBrowse) {
                 furi_mutex_acquire(app->mutex, FuriWaitForever);
@@ -465,7 +491,10 @@ static void run_viewport(SstvApp* app) {
             }
             if(ev.input.type != InputTypeShort) break;
             if(ev.input.key == InputKeyBack) {
-                if(app->state == StateTransmit || app->state == StateDone) {
+                if(app->state == StateTest) {
+                    sstv_tx_stop();
+                    set_state(app, StateBrowse);
+                } else if(app->state == StateTransmit || app->state == StateDone) {
                     sstv_tx_stop();
                     set_state(app, StatePreview);
                 } else {

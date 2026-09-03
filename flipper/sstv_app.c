@@ -9,6 +9,7 @@
 
 #include "sstv_params.h"
 #include "pbm.h"
+#include "sstv_preview.h"
 #include "sstv_tx.h"
 
 #define TAG "SstvTx"
@@ -40,6 +41,7 @@ typedef struct {
     FuriMutex* mutex;
     FuriString* path;
     uint8_t* image; /* SSTV_IMAGE_BYTES */
+    uint8_t preview[SSTV_PREVIEW_BYTES]; /* 80x48 sheet drawn on screen, same dither the receiver gets */
     AppState state;
     uint16_t frames_sent;
     uint16_t frames_total;
@@ -96,26 +98,47 @@ static void led_stop(SstvApp* app) {
 
 /* ---- drawing ---- */
 
-/* Preview shrunk to 128x64. Rows whose image lines have already been transmitted are drawn
- * inverted, so the picture itself is the progress bar, filling top to bottom. */
-static void draw_preview(Canvas* canvas, const uint8_t* image, int lines_done) {
-    for(int y = 0; y < 64; y++) {
-        int sy = y * SSTV_HEIGHT / 64;
-        bool inv = sy < lines_done;
-        const uint8_t* row = image + sy * SSTV_LINE_BYTES;
-        for(int x = 0; x < 128; x++) {
-            int sx = x * SSTV_WIDTH / 128;
-            bool black = (row[sx >> 3] & (0x80 >> (sx & 7))) != 0;
-            if(black != inv) canvas_draw_dot(canvas, x, y);
+/* The picture as an 80x48 sheet with a frame, centred above the status strip. As lines go
+ * out the sheet slides up and leaves through the top edge, as if fed into a shredder; the
+ * Playdate shows the same sheet coming in from its bottom edge. */
+#define SHEET_X 24
+#define SHEET_Y 2
+#define SHEET_BOTTOM 52 /* last screen row the sheet may use */
+
+static void hline_clipped(Canvas* canvas, int x0, int x1, int y) {
+    if(y < 0 || y > SHEET_BOTTOM) return;
+    canvas_draw_line(canvas, x0, y, x1, y);
+}
+
+static void vline_clipped(Canvas* canvas, int x, int y0, int y1) {
+    if(y0 < 0) y0 = 0;
+    if(y1 > SHEET_BOTTOM) y1 = SHEET_BOTTOM;
+    if(y0 > y1) return;
+    canvas_draw_line(canvas, x, y0, x, y1);
+}
+
+static void draw_sheet(Canvas* canvas, const uint8_t* preview, int lines_done) {
+    int y0 = SHEET_Y - lines_done * SSTV_PREVIEW_H / SSTV_HEIGHT; /* top row of the picture */
+    for(int py = 0; py < SSTV_PREVIEW_H; py++) {
+        int y = y0 + py;
+        if(y < 0 || y > SHEET_BOTTOM) continue;
+        const uint8_t* row = preview + py * SSTV_PREVIEW_LINE_BYTES;
+        for(int px = 0; px < SSTV_PREVIEW_W; px++) {
+            if(row[px >> 3] & (0x80 >> (px & 7))) canvas_draw_dot(canvas, SHEET_X + px, y);
         }
     }
+    /* frame one pixel outside the picture */
+    hline_clipped(canvas, SHEET_X - 1, SHEET_X + SSTV_PREVIEW_W, y0 - 1);
+    hline_clipped(canvas, SHEET_X - 1, SHEET_X + SSTV_PREVIEW_W, y0 + SSTV_PREVIEW_H);
+    vline_clipped(canvas, SHEET_X - 1, y0 - 1, y0 + SSTV_PREVIEW_H);
+    vline_clipped(canvas, SHEET_X + SSTV_PREVIEW_W, y0 - 1, y0 + SSTV_PREVIEW_H);
 }
 
 static void draw_callback(Canvas* canvas, void* ctx) {
     SstvApp* app = ctx;
     furi_mutex_acquire(app->mutex, FuriWaitForever);
     canvas_clear(canvas);
-    draw_preview(canvas, app->image, app->state == StatePreview ? 0 : app->lines_done);
+    if(app->state != StateDone) draw_sheet(canvas, app->preview, app->state == StatePreview ? 0 : app->lines_done);
 
     /* status strip */
     canvas_set_color(canvas, ColorWhite);
@@ -287,6 +310,7 @@ int32_t sstv_app_main(void* p) {
             show_error(dialogs, "Need a P4 .pbm\nexactly 400x240");
             continue;
         }
+        sstv_preview_make(app->image, app->preview);
         {
             /* file name without directory, sent to the receiver in the meta block */
             const char* full = furi_string_get_cstr(app->path);

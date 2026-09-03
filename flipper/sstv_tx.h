@@ -34,3 +34,6 @@ int sstv_tx_total_frames(void);
 
 /* Symbol currently on the speaker: 0..SSTV_NUM_TONES-1 data (0 = silence), -1 sync, -2 idle. */
 int sstv_tx_current_symbol(void);
+
+/* Whether the frame on the speaker is an outer-code parity frame (LED colour). */
+bool sstv_tx_current_is_parity(void);

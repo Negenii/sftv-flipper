@@ -32,6 +32,7 @@ typedef struct {
     uint8_t* frames; /* physical frames, interleaved (SSTV_MAX_FRAMES capacity) */
     uint8_t* lines_after; /* lines complete after each physical frame */
     uint16_t total; /* physical frames for this image */
+    int data_frames; /* data positions of the pass (for the parity frame lookup), 0 unknown */
     bool coded;
     volatile TxPhase phase;
     volatile uint16_t line; /* physical frame index */
@@ -232,6 +233,13 @@ bool sstv_tx_start(const uint8_t* image_bits, const char* name, bool loop, SstvT
     tx.frames = malloc(SSTV_MAX_FRAMES * SSTV_FRAME_BYTES);
     tx.lines_after = malloc(SSTV_MAX_FRAMES);
     tx.total = (uint16_t)sstv_build_physical(image_bits, name, tx.frames, tx.lines_after, &tx.coded);
+    tx.data_frames = 0;
+    for(int d = 1; d <= SSTV_MAX_DATA_FRAMES; d++) {
+        if(sstv_pass_total(d) == tx.total) {
+            tx.data_frames = d;
+            break;
+        }
+    }
     tx.loop = loop;
     tx.test = false;
     return tx_run(true, cb, ctx);
@@ -287,4 +295,9 @@ bool sstv_tx_is_coded(void) {
 
 int sstv_tx_current_symbol(void) {
     return tx.running ? tx.playing : -2;
+}
+
+bool sstv_tx_current_is_parity(void) {
+    if(!tx.running || tx.test || tx.data_frames == 0) return false;
+    return sstv_pass_frame_kind(tx.line, tx.data_frames) == SSTV_PASS_PARITY;
 }

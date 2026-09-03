@@ -64,15 +64,18 @@ typedef struct {
 } SstvApp;
 
 /* The LED shows the data as it plays: off for the silence symbol, blue for tones (brighter
- * for higher tones), violet during the sync burst. Polled every 2 ms from its own thread
+ * for higher tones, green instead of blue during outer-code parity frames), red during the sync burst. Polled every 2 ms from its own thread
  * because the LED driver sits on I2C and cannot be touched from the timer ISR. */
 static int32_t led_thread_fn(void* ctx) {
     SstvApp* app = ctx;
     int last = -99;
+    bool last_parity = false;
     while(app->led_run) {
         int sym = sstv_tx_current_symbol();
-        if(sym != last) {
+        bool parity = sstv_tx_current_is_parity(); /* parity frames glow green instead of blue */
+        if(sym != last || parity != last_parity) {
             last = sym;
+            last_parity = parity;
             if(sym == -1) { /* sync */
                 furi_hal_light_set(LightRed, 0xFF);
                 furi_hal_light_set(LightGreen, 0);
@@ -81,9 +84,10 @@ static int32_t led_thread_fn(void* ctx) {
                 furi_hal_light_set(LightRed | LightGreen | LightBlue, 0);
             } else {
                 static const uint8_t level[SSTV_NUM_TONES] = {0, 0x40, 0x90, 0xFF};
+                uint8_t v = sym < SSTV_NUM_TONES ? level[sym] : 0xFF;
                 furi_hal_light_set(LightRed, 0);
-                furi_hal_light_set(LightGreen, 0);
-                furi_hal_light_set(LightBlue, sym < SSTV_NUM_TONES ? level[sym] : 0xFF);
+                furi_hal_light_set(LightGreen, parity ? v : 0);
+                furi_hal_light_set(LightBlue, parity ? 0 : v);
             }
         }
         furi_delay_ms(2);

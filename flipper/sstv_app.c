@@ -5,6 +5,7 @@
 #include <dialogs/dialogs.h>
 #include <storage/storage.h>
 #include <input/input.h>
+#include <furi_hal_light.h>
 
 #include "sstv_params.h"
 #include "pbm.h"
@@ -24,6 +25,7 @@ typedef enum {
     EvInput,
     EvFrame,
     EvTxDone,
+    EvLedTick,
 } EventType;
 
 typedef struct {
@@ -41,7 +43,33 @@ typedef struct {
     uint8_t* image; /* SSTV_IMAGE_BYTES */
     AppState state;
     uint16_t frames_sent;
+    FuriTimer* led_timer; /* 100 ms tick while transmitting: blue blink, violet on sync */
+    uint8_t led_phase;
+    uint8_t led_violet_ticks; /* ticks left of the violet sync flash */
 } SstvApp;
+
+/* Blue blinks while data symbols go out; every frame boundary (= sync burst) flashes violet. */
+static void led_apply(SstvApp* app) {
+    if(app->state != StateTransmit) {
+        furi_hal_light_set(LightRed | LightGreen | LightBlue, 0);
+        return;
+    }
+    if(app->led_violet_ticks > 0) {
+        furi_hal_light_set(LightRed, 0x60);
+        furi_hal_light_set(LightGreen, 0);
+        furi_hal_light_set(LightBlue, 0xFF);
+    } else {
+        furi_hal_light_set(LightRed, 0);
+        furi_hal_light_set(LightGreen, 0);
+        furi_hal_light_set(LightBlue, (app->led_phase & 1) ? 0xFF : 0x18);
+    }
+}
+
+static void led_timer_callback(void* ctx) {
+    SstvApp* app = ctx;
+    AppEvent ev = {.type = EvLedTick};
+    furi_message_queue_put(app->queue, &ev, 0);
+}
 
 /* ---- drawing ---- */
 
@@ -143,6 +171,14 @@ static void set_state(SstvApp* app, AppState s) {
     app->state = s;
     if(s == StatePreview) app->frames_sent = 0;
     furi_mutex_release(app->mutex);
+    if(s == StateTransmit) {
+        app->led_phase = 0;
+        app->led_violet_ticks = 1;
+        furi_timer_start(app->led_timer, furi_ms_to_ticks(100));
+    } else {
+        furi_timer_stop(app->led_timer);
+    }
+    led_apply(app);
     view_port_update(app->vp);
 }
 
@@ -167,7 +203,14 @@ static void run_viewport(SstvApp* app) {
             furi_mutex_acquire(app->mutex, FuriWaitForever);
             app->frames_sent = ev.line + 1;
             furi_mutex_release(app->mutex);
+            app->led_violet_ticks = 1; /* the next frame's sync is playing now */
+            led_apply(app);
             view_port_update(app->vp);
+            break;
+        case EvLedTick:
+            app->led_phase++;
+            if(app->led_violet_ticks > 0) app->led_violet_ticks--;
+            led_apply(app);
             break;
         case EvTxDone:
             sstv_tx_stop();
@@ -198,6 +241,7 @@ int32_t sstv_app_main(void* p) {
     memset(app, 0, sizeof *app);
     app->queue = furi_message_queue_alloc(16, sizeof(AppEvent));
     app->mutex = furi_mutex_alloc(FuriMutexTypeNormal);
+    app->led_timer = furi_timer_alloc(led_timer_callback, FuriTimerTypePeriodic, app);
     app->path = furi_string_alloc();
     app->image = malloc(SSTV_IMAGE_BYTES);
     app->gui = furi_record_open(RECORD_GUI);
@@ -226,6 +270,9 @@ int32_t sstv_app_main(void* p) {
     furi_record_close(RECORD_STORAGE);
     view_port_free(app->vp);
     furi_record_close(RECORD_GUI);
+    furi_timer_stop(app->led_timer);
+    furi_timer_free(app->led_timer);
+    furi_hal_light_set(LightRed | LightGreen | LightBlue, 0);
     free(app->image);
     furi_string_free(app->path);
     furi_mutex_free(app->mutex);

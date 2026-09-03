@@ -30,7 +30,9 @@ typedef enum {
 
 typedef struct {
     uint8_t* frames; /* physical frames, interleaved (SSTV_MAX_FRAMES capacity) */
+    uint8_t* lines_after; /* lines complete after each physical frame */
     uint16_t total; /* physical frames for this image */
+    bool coded;
     volatile TxPhase phase;
     volatile uint16_t line; /* physical frame index */
     uint16_t symbol; /* next symbol index within the frame */
@@ -140,12 +142,13 @@ static void tx_isr(void* context) {
     }
 }
 
-bool sstv_tx_start(const uint8_t* image_bits, bool loop, SstvTxCallback cb, void* ctx) {
+bool sstv_tx_start(const uint8_t* image_bits, const char* name, bool loop, SstvTxCallback cb, void* ctx) {
     if(tx.running) return false;
     if(!furi_hal_speaker_acquire(1000)) return false;
 
     tx.frames = malloc(SSTV_MAX_FRAMES * SSTV_FRAME_BYTES);
-    tx.total = (uint16_t)sstv_build_physical(image_bits, tx.frames);
+    tx.lines_after = malloc(SSTV_MAX_FRAMES);
+    tx.total = (uint16_t)sstv_build_physical(image_bits, name, tx.frames, tx.lines_after, &tx.coded);
     tx.loop = loop;
     tx.cb = cb;
     tx.ctx = ctx;
@@ -208,6 +211,8 @@ void sstv_tx_stop(void) {
     furi_hal_speaker_release(); /* stops the timer, disables the TIM16 bus, parks the pin */
     free(tx.frames);
     tx.frames = NULL;
+    free(tx.lines_after);
+    tx.lines_after = NULL;
     tx.running = false;
 }
 
@@ -217,6 +222,16 @@ bool sstv_tx_is_running(void) {
 
 int sstv_tx_total_frames(void) {
     return tx.running ? tx.total : 0;
+}
+
+int sstv_tx_lines_after(int frames_sent) {
+    if(!tx.running || !tx.lines_after || frames_sent <= 0) return 0;
+    if(frames_sent > tx.total) frames_sent = tx.total;
+    return tx.lines_after[frames_sent - 1];
+}
+
+bool sstv_tx_is_coded(void) {
+    return tx.running && tx.coded;
 }
 
 int sstv_tx_current_symbol(void) {

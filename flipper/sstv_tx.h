@@ -9,7 +9,13 @@ typedef void (*SstvTxCallback)(void* ctx, uint16_t frame, bool done);
 
 /* image_bits: SSTV_IMAGE_BYTES of P4 raster (1 = black). Packed, RS-coded and interleaved
  * into physical frames. Acquires the speaker. Returns false if the speaker is busy. */
-bool sstv_tx_start(const uint8_t* image_bits, bool loop, SstvTxCallback cb, void* ctx);
+bool sstv_tx_start(const uint8_t* image_bits, const char* name, bool loop, SstvTxCallback cb, void* ctx);
+
+/* Image lines completed once `frames_sent` physical frames are out (for progress display). */
+int sstv_tx_lines_after(int frames_sent);
+
+/* Whether the current transmission uses the coded (compressed) mode. */
+bool sstv_tx_is_coded(void);
 
 /* Safe to call at any time, including after the transmitter finished on its own. */
 void sstv_tx_stop(void);

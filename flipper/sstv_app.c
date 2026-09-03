@@ -43,6 +43,9 @@ typedef struct {
     AppState state;
     uint16_t frames_sent;
     uint16_t frames_total;
+    uint16_t lines_done; /* image lines already transmitted (progress) */
+    bool coded;
+    char name[32]; /* file name without directory, sent in the meta block */
     FuriThread* led_thread; /* follows the symbol on the speaker while transmitting */
     volatile bool led_run;
 } SstvApp;
@@ -58,9 +61,9 @@ static int32_t led_thread_fn(void* ctx) {
         if(sym != last) {
             last = sym;
             if(sym == -1) { /* sync */
-                furi_hal_light_set(LightRed, 0x60);
+                furi_hal_light_set(LightRed, 0xFF);
                 furi_hal_light_set(LightGreen, 0);
-                furi_hal_light_set(LightBlue, 0xFF);
+                furi_hal_light_set(LightBlue, 0);
             } else if(sym <= 0) { /* silence or idle */
                 furi_hal_light_set(LightRed | LightGreen | LightBlue, 0);
             } else {
@@ -93,13 +96,17 @@ static void led_stop(SstvApp* app) {
 
 /* ---- drawing ---- */
 
-static void draw_preview(Canvas* canvas, const uint8_t* image) {
+/* Preview shrunk to 128x64. Rows whose image lines have already been transmitted are drawn
+ * inverted, so the picture itself is the progress bar, filling top to bottom. */
+static void draw_preview(Canvas* canvas, const uint8_t* image, int lines_done) {
     for(int y = 0; y < 64; y++) {
         int sy = y * SSTV_HEIGHT / 64;
+        bool inv = sy < lines_done;
         const uint8_t* row = image + sy * SSTV_LINE_BYTES;
         for(int x = 0; x < 128; x++) {
             int sx = x * SSTV_WIDTH / 128;
-            if(row[sx >> 3] & (0x80 >> (sx & 7))) canvas_draw_dot(canvas, x, y);
+            bool black = (row[sx >> 3] & (0x80 >> (sx & 7))) != 0;
+            if(black != inv) canvas_draw_dot(canvas, x, y);
         }
     }
 }
@@ -108,7 +115,7 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     SstvApp* app = ctx;
     furi_mutex_acquire(app->mutex, FuriWaitForever);
     canvas_clear(canvas);
-    draw_preview(canvas, app->image);
+    draw_preview(canvas, app->image, app->state == StatePreview ? 0 : app->lines_done);
 
     /* status strip */
     canvas_set_color(canvas, ColorWhite);
@@ -123,7 +130,7 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         canvas_draw_str(canvas, 2, 62, "OK: send   Back: files");
         break;
     case StateTransmit:
-        snprintf(buf, sizeof buf, "TX %u/%u", app->frames_sent, app->frames_total);
+        snprintf(buf, sizeof buf, "%s %u/%u", app->coded ? "TXc" : "TX", app->frames_sent, app->frames_total);
         canvas_draw_str(canvas, 2, 62, buf);
         elements_progress_bar(
             canvas, 62, 55, 64, app->frames_total ? (float)app->frames_sent / app->frames_total : 0.0f);
@@ -190,7 +197,10 @@ static void show_error(DialogsApp* dialogs, const char* text) {
 static void set_state(SstvApp* app, AppState s) {
     furi_mutex_acquire(app->mutex, FuriWaitForever);
     app->state = s;
-    if(s == StatePreview) app->frames_sent = 0;
+    if(s == StatePreview) {
+        app->frames_sent = 0;
+        app->lines_done = 0;
+    }
     furi_mutex_release(app->mutex);
     if(s == StateTransmit) {
         led_start(app);
@@ -201,8 +211,10 @@ static void set_state(SstvApp* app, AppState s) {
 }
 
 static void start_tx(SstvApp* app) {
-    if(sstv_tx_start(app->image, false, tx_callback, app)) {
+    if(sstv_tx_start(app->image, app->name, false, tx_callback, app)) {
         app->frames_total = (uint16_t)sstv_tx_total_frames();
+        app->coded = sstv_tx_is_coded();
+        app->lines_done = 0;
         set_state(app, StateTransmit);
     } else {
         FURI_LOG_E(TAG, "speaker busy");
@@ -221,6 +233,7 @@ static void run_viewport(SstvApp* app) {
         case EvFrame:
             furi_mutex_acquire(app->mutex, FuriWaitForever);
             app->frames_sent = ev.line + 1;
+            app->lines_done = (uint16_t)sstv_tx_lines_after(app->frames_sent);
             furi_mutex_release(app->mutex);
             view_port_update(app->vp);
             break;
@@ -273,6 +286,14 @@ int32_t sstv_app_main(void* p) {
         if(!load_pbm(storage, furi_string_get_cstr(app->path), app->image)) {
             show_error(dialogs, "Need a P4 .pbm\nexactly 400x240");
             continue;
+        }
+        {
+            /* file name without directory, sent to the receiver in the meta block */
+            const char* full = furi_string_get_cstr(app->path);
+            const char* base = strrchr(full, '/');
+            base = base ? base + 1 : full;
+            strncpy(app->name, base, sizeof(app->name) - 1);
+            app->name[sizeof(app->name) - 1] = 0;
         }
         run_viewport(app);
     }

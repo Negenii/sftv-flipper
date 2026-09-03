@@ -51,8 +51,15 @@ static const int tone_duty[SSTV_NUM_TONES] = SSTV_TONE_DUTY_PCT_INIT;
 #define CYCLES_SYNC CYCLES_FOR(SSTV_FSYNC_HZ, SSTV_SYNC_US) /* 80 at 16 ms, fits 8-bit RCR */
 
 static inline void tone_settings(int v, uint32_t* arr, uint32_t* cycles, uint32_t* duty_pct) {
-    *arr = ARR_FOR(tone_hz[v]); /* 2500 -> 25599, 3000 -> 21332 (3000.05 Hz), 3500 -> 18284, 4000 -> 15999 */
-    *cycles = CYCLES_FOR(tone_hz[v], SSTV_SYMBOL_US); /* 10, 12, 14, 16 at 4 ms */
+    if(tone_hz[v] == 0) {
+        /* Silence: keep the timer running at 3000 Hz for the symbol length with 0 % duty. */
+        *arr = ARR_FOR(3000);
+        *cycles = CYCLES_FOR(3000, SSTV_SYMBOL_US);
+        *duty_pct = 0;
+        return;
+    }
+    *arr = ARR_FOR(tone_hz[v]); /* 2500 -> 25599, 3000 -> 21332 (3000.05 Hz), 3500 -> 18284 */
+    *cycles = CYCLES_FOR(tone_hz[v], SSTV_SYMBOL_US); /* 10, 12, 14 at 4 ms */
     *duty_pct = (uint32_t)tone_duty[v];
 }
 

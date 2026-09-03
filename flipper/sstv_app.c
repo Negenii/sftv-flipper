@@ -249,7 +249,7 @@ static void fit_name(Canvas* canvas, char* out, size_t cap, const char* name, in
 static void draw_browse(Canvas* canvas, SstvApp* app) {
     char buf[32];
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 10, "SFTV");
+    canvas_draw_str(canvas, 2, 10, "Slow Flipper TV");
     canvas_set_font(canvas, FontSecondary);
     if(app->file_count == 0) {
         canvas_draw_str(canvas, 2, 30, "No pictures. Put 400x240");
@@ -257,26 +257,28 @@ static void draw_browse(Canvas* canvas, SstvApp* app) {
         canvas_draw_str(canvas, 2, 50, "apps_data/sftv_tx");
         return;
     }
-    snprintf(buf, sizeof buf, "%d/%d", app->file_index + 1, app->file_count);
-    canvas_draw_str(canvas, 126 - canvas_string_width(canvas, buf), 10, buf);
     int page = app->file_index / TILES_PER_PAGE * TILES_PER_PAGE;
     for(int k = 0; k < TILES_PER_PAGE; k++) {
         int idx = page + k;
         if(idx >= app->file_count) break;
-        int x = 3 + k * 42, y = 17; /* picture origin; frame one pixel outside */
+        /* pictures at x = 2, 44, 86: every tile framed, the frames touching so a 2 px line
+         * separates neighbours; the cursor adds a second frame outside */
+        int x = 2 + k * 42, y = 17;
         const uint8_t* t = app->thumbs[idx];
         for(int py = 0; py < SSTV_TINY_H; py++)
             for(int px = 0; px < SSTV_TINY_W; px++)
                 if(t[py * SSTV_TINY_LINE_BYTES + (px >> 3)] & (0x80 >> (px & 7))) canvas_draw_dot(canvas, x + px, y + py);
         canvas_draw_frame(canvas, x - 1, y - 1, SSTV_TINY_W + 2, SSTV_TINY_H + 2);
-        if(idx == app->file_index) canvas_draw_rframe(canvas, x - 3, y - 3, SSTV_TINY_W + 6, SSTV_TINY_H + 6, 2);
+        if(idx == app->file_index) canvas_draw_frame(canvas, x - 2, y - 2, SSTV_TINY_W + 4, SSTV_TINY_H + 4);
         fit_name(canvas, buf, sizeof buf, app->files[idx], SSTV_TINY_W + 2);
         canvas_draw_str(canvas, x + (SSTV_TINY_W - (int)canvas_string_width(canvas, buf)) / 2, y + SSTV_TINY_H + 12, buf);
     }
     canvas_draw_icon(canvas, 2, 54, &I_Ok_btn_9x9);
     canvas_draw_str(canvas, 14, 62, "open");
-    canvas_draw_icon(canvas, 46, 53, &I_back_10px);
-    canvas_draw_str(canvas, 58, 62, "exit");
+    canvas_draw_icon(canvas, 44, 53, &I_back_10px);
+    canvas_draw_str(canvas, 56, 62, "exit");
+    snprintf(buf, sizeof buf, "%d/%d", app->file_index + 1, app->file_count);
+    canvas_draw_str(canvas, 126 - canvas_string_width(canvas, buf), 62, buf);
 }
 
 static void draw_callback(Canvas* canvas, void* ctx) {

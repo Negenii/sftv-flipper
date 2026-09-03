@@ -250,7 +250,14 @@ static void draw_browse(Canvas* canvas, SstvApp* app) {
     char buf[32];
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 2, 10, "Slow Flipper TV");
+    /* "TX" pill after the title */
+    int px = 2 + canvas_string_width(canvas, "Slow Flipper TV") + 5;
     canvas_set_font(canvas, FontSecondary);
+    int pw = canvas_string_width(canvas, "TX") + 6;
+    canvas_draw_rbox(canvas, px, 1, pw, 11, 3);
+    canvas_set_color(canvas, ColorWhite);
+    canvas_draw_str(canvas, px + 3, 10, "TX");
+    canvas_set_color(canvas, ColorBlack);
     if(app->file_count == 0) {
         canvas_draw_str(canvas, 2, 30, "No pictures. Put 400x240");
         canvas_draw_str(canvas, 2, 40, "P4 .pbm files into");

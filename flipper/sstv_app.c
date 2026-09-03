@@ -152,39 +152,45 @@ static void draw_sheet(Canvas* canvas, const uint8_t* preview, int lines_done) {
     vline_clipped(canvas, SHEET_X + SSTV_PREVIEW_W, y0 - 1, y0 + SSTV_PREVIEW_H);
 }
 
+/* Button hint: icon plus a word, baseline at `y`. */
+static void hint(Canvas* canvas, const Icon* icon, int icon_h, const char* text, int y) {
+    canvas_draw_icon(canvas, PANEL_X, y - icon_h + 1, icon);
+    canvas_draw_str(canvas, PANEL_X + 13, y, text);
+}
+
 static void draw_panel(Canvas* canvas, SstvApp* app) {
+    const int w = 128 - PANEL_X; /* 40 px */
     char buf[16];
     canvas_draw_line(canvas, PANEL_X - 3, 0, PANEL_X - 3, 63);
     canvas_set_font(canvas, FontSecondary);
     switch(app->state) {
     case StatePreview:
-        canvas_draw_str(canvas, PANEL_X, 10, "Ready");
-        canvas_draw_str(canvas, PANEL_X, 44, "OK send");
-        canvas_draw_str(canvas, PANEL_X, 54, "Back");
-        canvas_draw_str(canvas, PANEL_X, 63, "files");
+        canvas_draw_str(canvas, PANEL_X, 9, "Ready");
+        hint(canvas, &I_Ok_btn_9x9, 9, "send", 52);
+        hint(canvas, &I_back_10px, 10, "files", 63);
         break;
     case StateTransmit: {
-        canvas_draw_str(canvas, PANEL_X, 10, app->coded ? "TX zip" : "TX raw");
-        snprintf(buf, sizeof buf, "%u/%u", app->frames_sent, app->frames_total);
-        canvas_draw_str(canvas, PANEL_X, 20, buf);
-        /* vertical bar, same height as the sheet */
-        int bar_x = PANEL_X + 30, bar_h = SSTV_PREVIEW_H;
-        canvas_draw_frame(canvas, bar_x, SHEET_Y, 6, bar_h);
-        int fill = app->frames_total ? (int)((uint32_t)(bar_h - 2) * app->frames_sent / app->frames_total) : 0;
-        if(fill > 0) canvas_draw_box(canvas, bar_x + 1, SHEET_Y + 1, 4, fill);
-        snprintf(buf, sizeof buf, "%u lines", app->lines_done);
+        canvas_draw_str(canvas, PANEL_X, 9, app->coded ? "TX zip" : "TX raw");
+        float p = app->frames_total ? (float)app->frames_sent / app->frames_total : 0.0f;
+        elements_progress_bar(canvas, PANEL_X, 12, w, p);
+        snprintf(buf, sizeof buf, "%u/%u", app->lines_done, SSTV_HEIGHT);
         canvas_draw_str(canvas, PANEL_X, 32, buf);
-        canvas_draw_str(canvas, PANEL_X, 63, "Back stop");
+        uint32_t left_s = (uint32_t)(app->frames_total - app->frames_sent) * (SSTV_PHYS_US / 1000) / 1000;
+        snprintf(buf, sizeof buf, "~%lu:%02lu", (unsigned long)(left_s / 60), (unsigned long)(left_s % 60));
+        canvas_draw_str(canvas, PANEL_X, 42, buf);
+        hint(canvas, &I_back_10px, 10, "stop", 63);
         break;
     }
-    case StateDone:
-        canvas_draw_str(canvas, PANEL_X, 10, "Done");
-        snprintf(buf, sizeof buf, "%u fr", app->frames_total);
-        canvas_draw_str(canvas, PANEL_X, 20, buf);
-        canvas_draw_str(canvas, PANEL_X, 44, "OK again");
-        canvas_draw_str(canvas, PANEL_X, 54, "Back");
-        canvas_draw_str(canvas, PANEL_X, 63, "files");
+    case StateDone: {
+        canvas_draw_str(canvas, PANEL_X, 9, "Done");
+        elements_progress_bar(canvas, PANEL_X, 12, w, 1.0f);
+        uint32_t total_s = (uint32_t)app->frames_total * (SSTV_PHYS_US / 1000) / 1000;
+        snprintf(buf, sizeof buf, "%lu:%02lu", (unsigned long)(total_s / 60), (unsigned long)(total_s % 60));
+        canvas_draw_str(canvas, PANEL_X, 32, buf);
+        hint(canvas, &I_Ok_btn_9x9, 9, "again", 52);
+        hint(canvas, &I_back_10px, 10, "files", 63);
         break;
+    }
     }
 }
 

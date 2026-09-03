@@ -4,7 +4,7 @@ App(
     apptype=FlipperAppType.EXTERNAL,
     entry_point="sftv_app_main",
     requires=["gui", "storage"],
-    stack_size=2 * 1024,
+    stack_size=4 * 1024, # sstv_build_physical keeps ~1.5 kB of buffers on the stack
     fap_category="Tools",
     fap_icon_assets="images",
     fap_version="0.1",

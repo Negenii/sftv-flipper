@@ -27,6 +27,7 @@ typedef struct {
     volatile TxPhase phase;
     volatile uint16_t line;
     uint16_t bit;
+    uint16_t leader_left; /* alternating 0/1 symbols still to send */
     uint32_t cycles_left;
     SstvTxCallback cb;
     void* ctx;
@@ -40,12 +41,11 @@ static const uint32_t arr_bit[2] = {
     TX_TIMER_CLK_HZ / SSTV_F1_HZ - 1, /* 21332 -> 3000.05 Hz */
 };
 static const uint32_t cycles_bit[2] = {
-    SSTV_F0_HZ * SSTV_BIT_US / 1000000, /* 2 */
-    SSTV_F1_HZ * SSTV_BIT_US / 1000000, /* 3 */
+    SSTV_F0_HZ * SSTV_BIT_US / 1000000, /* 4 at 2 ms */
+    SSTV_F1_HZ * SSTV_BIT_US / 1000000, /* 6 at 2 ms */
 };
 #define ARR_SYNC (TX_TIMER_CLK_HZ / SSTV_FSYNC_HZ - 1) /* 15999 */
-#define CYCLES_SYNC (SSTV_FSYNC_HZ * SSTV_SYNC_US / 1000000) /* 20 */
-#define CYCLES_LEADER (SSTV_F1_HZ * (SSTV_LEADER_US / 1000000)) /* 3000 */
+#define CYCLES_SYNC (SSTV_FSYNC_HZ * SSTV_SYNC_US / 1000000) /* 32 at 8 ms */
 
 /* Called at the start of a period (CNT just wrapped to 0): writing ARR/CCR without preload
  * applies to the period that has just begun. */
@@ -69,8 +69,14 @@ static void tx_isr(void* context) {
 
     switch(tx.phase) {
     case PhaseLeader:
-        tx.phase = PhaseSync;
-        tx_set_tone(ARR_SYNC, CYCLES_SYNC);
+        if(tx.leader_left > 0) {
+            tx.leader_left--;
+            int b = tx.leader_left & 1;
+            tx_set_tone(arr_bit[b], cycles_bit[b]);
+        } else {
+            tx.phase = PhaseSync;
+            tx_set_tone(ARR_SYNC, CYCLES_SYNC);
+        }
         break;
     case PhaseSync:
         tx.phase = PhaseBits;
@@ -118,7 +124,8 @@ bool sstv_tx_start(const uint8_t* image_bits, SstvTxCallback cb, void* ctx) {
     tx.line = 0;
     tx.bit = 0;
     tx.phase = PhaseLeader;
-    tx.cycles_left = CYCLES_LEADER;
+    tx.leader_left = SSTV_LEADER_SYMBOLS - 1;
+    tx.cycles_left = cycles_bit[1]; /* first leader symbol, matching the timer's initial ARR */
 
     LL_TIM_InitTypeDef init = {0};
     init.Prescaler = 0;

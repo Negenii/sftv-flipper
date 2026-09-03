@@ -235,7 +235,7 @@ bool sstv_tx_start(const uint8_t* image_bits, const char* name, bool loop, SstvT
     tx.total = (uint16_t)sstv_build_physical(image_bits, name, tx.frames, tx.lines_after, &tx.coded);
     tx.data_frames = 0;
     for(int d = 1; d <= SSTV_MAX_DATA_FRAMES; d++) {
-        if(sstv_pass_total(d) == tx.total) {
+        if(sstv_pass_total(d, sstv_pass_intro(tx.coded)) == tx.total) {
             tx.data_frames = d;
             break;
         }
@@ -299,5 +299,5 @@ int sstv_tx_current_symbol(void) {
 
 bool sstv_tx_current_is_parity(void) {
     if(!tx.running || tx.test || tx.data_frames == 0) return false;
-    return sstv_pass_frame_kind(tx.line, tx.data_frames) == SSTV_PASS_PARITY;
+    return sstv_pass_frame_kind(tx.line, tx.data_frames, sstv_pass_intro(tx.coded)) == SSTV_PASS_PARITY;
 }

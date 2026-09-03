@@ -50,8 +50,8 @@ static const int tone_hz[SSTV_NUM_TONES] = SSTV_TONES_INIT;
 #define CYCLES_SYNC CYCLES_FOR(SSTV_FSYNC_HZ, SSTV_SYNC_US) /* 80 at 16 ms, fits 8-bit RCR */
 
 static inline void tone_settings(int v, uint32_t* arr, uint32_t* cycles) {
-    *arr = ARR_FOR(tone_hz[v]); /* 3500 -> 18284 (3500.1 Hz), 4000 -> 15999, 5500 -> 11635, 6000 -> 10665 */
-    *cycles = CYCLES_FOR(tone_hz[v], SSTV_SYMBOL_US); /* 14, 16, 22, 24 at 4 ms */
+    *arr = ARR_FOR(tone_hz[v]); /* 3000 -> 21332 (3000.05 Hz), 3500 -> 18284, 4000 -> 15999, 4500 -> 14221 */
+    *cycles = CYCLES_FOR(tone_hz[v], SSTV_SYMBOL_US); /* 12, 14, 16, 18 at 4 ms */
 }
 
 /* Advances the sequencer by one symbol and returns its PWM settings. */

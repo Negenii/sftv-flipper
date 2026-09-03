@@ -29,12 +29,13 @@ typedef enum {
 } TxPhase;
 
 typedef struct {
-    uint8_t* frames; /* SSTV_HEIGHT * SSTV_FRAME_BYTES, pre-packed */
+    uint8_t* frames; /* SSTV_NUM_SEGS * SSTV_FRAME_BYTES physical frames, interleaved */
     volatile TxPhase phase;
-    volatile uint16_t line;
+    volatile uint16_t line; /* physical frame index */
     uint16_t symbol; /* next symbol index within the frame */
     uint16_t leader_left; /* leader symbols still to send (cycling tone 0,1,2,3) */
-    int pending_line; /* line whose last symbol was just programmed, -1 none */
+    int pending_line; /* physical frame whose last symbol was just programmed, -1 none */
+    bool loop; /* restart from frame 0 after the last one */
     SstvTxCallback cb;
     void* ctx;
     bool running;
@@ -75,10 +76,13 @@ static void tx_next_symbol(uint32_t* arr, uint32_t* cycles) {
         tx.symbol++;
         if(tx.symbol >= SSTV_SYMBOLS_PER_FRAME) {
             tx.pending_line = tx.line;
-            /* Loop forever: the receiver keeps good rows, so lines lost to noise on one
-             * pass are filled in on the next. The app stops us on Back. */
-            tx.line = (uint16_t)((tx.line + 1) % SSTV_HEIGHT);
-            tx.phase = PhaseSync;
+            tx.line++;
+            if(tx.line >= SSTV_NUM_SEGS) {
+                tx.line = 0;
+                tx.phase = tx.loop ? PhaseSync : PhaseDone;
+            } else {
+                tx.phase = PhaseSync;
+            }
         }
         return;
     case PhaseDone:
@@ -109,19 +113,23 @@ static void tx_isr(void* context) {
     if(tx.pending_line >= 0) {
         int finished = tx.pending_line;
         tx.pending_line = -1;
-        if(tx.cb) tx.cb(tx.ctx, (uint16_t)finished, finished == SSTV_HEIGHT - 1);
+        bool last = finished == SSTV_NUM_SEGS - 1;
+        if(last && !tx.loop) {
+            /* The last symbol is playing now; the programmed "next" symbol (tone 0) must not
+             * start: stop outputs at the coming update instead of feeding more symbols. */
+            LL_TIM_DisableIT_UPDATE(TX_TIMER);
+        }
+        if(tx.cb) tx.cb(tx.ctx, (uint16_t)finished, last);
     }
 }
 
-bool sstv_tx_start(const uint8_t* image_bits, SstvTxCallback cb, void* ctx) {
+bool sstv_tx_start(const uint8_t* image_bits, bool loop, SstvTxCallback cb, void* ctx) {
     if(tx.running) return false;
     if(!furi_hal_speaker_acquire(1000)) return false;
 
-    tx.frames = malloc(SSTV_HEIGHT * SSTV_FRAME_BYTES);
-    for(int y = 0; y < SSTV_HEIGHT; y++) {
-        sstv_frame_pack(
-            (uint8_t)y, image_bits + y * SSTV_LINE_BYTES, tx.frames + y * SSTV_FRAME_BYTES);
-    }
+    tx.frames = malloc(SSTV_NUM_SEGS * SSTV_FRAME_BYTES);
+    sstv_build_physical(image_bits, tx.frames);
+    tx.loop = loop;
     tx.cb = cb;
     tx.ctx = ctx;
     tx.line = 0;

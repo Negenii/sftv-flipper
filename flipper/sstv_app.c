@@ -17,12 +17,13 @@
 typedef enum {
     StatePreview,
     StateTransmit,
+    StateDone,
 } AppState;
 
 typedef enum {
     EvInput,
-    EvLine,
-    EvPassDone,
+    EvFrame,
+    EvTxDone,
 } EventType;
 
 typedef struct {
@@ -39,8 +40,7 @@ typedef struct {
     FuriString* path;
     uint8_t* image; /* SSTV_IMAGE_BYTES */
     AppState state;
-    uint16_t lines_sent;
-    uint16_t pass; /* 1-based pass number while transmitting */
+    uint16_t frames_sent;
 } SstvApp;
 
 /* ---- drawing ---- */
@@ -72,12 +72,15 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     char buf[32];
     switch(app->state) {
     case StatePreview:
-        canvas_draw_str(canvas, 2, 62, "OK: send (loops)  Back");
+        canvas_draw_str(canvas, 2, 62, "OK: send   Back: files");
         break;
     case StateTransmit:
-        snprintf(buf, sizeof buf, "P%u %u/%u", app->pass, app->lines_sent, (unsigned)SSTV_HEIGHT);
+        snprintf(buf, sizeof buf, "TX %u/%u", app->frames_sent, (unsigned)SSTV_NUM_SEGS);
         canvas_draw_str(canvas, 2, 62, buf);
-        elements_progress_bar(canvas, 62, 55, 64, (float)app->lines_sent / SSTV_HEIGHT);
+        elements_progress_bar(canvas, 62, 55, 64, (float)app->frames_sent / SSTV_NUM_SEGS);
+        break;
+    case StateDone:
+        canvas_draw_str(canvas, 2, 62, "Done.  OK: again   Back");
         break;
     }
     furi_mutex_release(app->mutex);
@@ -94,7 +97,7 @@ static void input_callback(InputEvent* input, void* ctx) {
 /* ISR context */
 static void tx_callback(void* ctx, uint16_t line, bool done) {
     SstvApp* app = ctx;
-    AppEvent ev = {.type = done ? EvPassDone : EvLine, .line = line};
+    AppEvent ev = {.type = done ? EvTxDone : EvFrame, .line = line};
     furi_message_queue_put(app->queue, &ev, 0);
 }
 
@@ -138,14 +141,13 @@ static void show_error(DialogsApp* dialogs, const char* text) {
 static void set_state(SstvApp* app, AppState s) {
     furi_mutex_acquire(app->mutex, FuriWaitForever);
     app->state = s;
-    if(s != StateTransmit) app->lines_sent = 0;
-    if(s == StateTransmit) app->pass = 1;
+    if(s == StatePreview) app->frames_sent = 0;
     furi_mutex_release(app->mutex);
     view_port_update(app->vp);
 }
 
 static void start_tx(SstvApp* app) {
-    if(sstv_tx_start(app->image, tx_callback, app)) {
+    if(sstv_tx_start(app->image, false, tx_callback, app)) {
         set_state(app, StateTransmit);
     } else {
         FURI_LOG_E(TAG, "speaker busy");
@@ -161,30 +163,27 @@ static void run_viewport(SstvApp* app) {
         AppEvent ev;
         if(furi_message_queue_get(app->queue, &ev, FuriWaitForever) != FuriStatusOk) continue;
         switch(ev.type) {
-        case EvLine:
+        case EvFrame:
             furi_mutex_acquire(app->mutex, FuriWaitForever);
-            app->lines_sent = ev.line + 1;
+            app->frames_sent = ev.line + 1;
             furi_mutex_release(app->mutex);
             view_port_update(app->vp);
             break;
-        case EvPassDone:
-            furi_mutex_acquire(app->mutex, FuriWaitForever);
-            app->lines_sent = 0;
-            app->pass++;
-            furi_mutex_release(app->mutex);
-            view_port_update(app->vp);
+        case EvTxDone:
+            sstv_tx_stop();
+            set_state(app, StateDone);
             break;
         case EvInput:
             if(ev.input.type != InputTypeShort) break;
             if(ev.input.key == InputKeyBack) {
-                if(app->state == StateTransmit) {
+                if(app->state == StateTransmit || app->state == StateDone) {
                     sstv_tx_stop();
                     set_state(app, StatePreview);
                 } else {
                     leave = true;
                 }
             } else if(ev.input.key == InputKeyOk) {
-                if(app->state == StatePreview) start_tx(app);
+                if(app->state == StatePreview || app->state == StateDone) start_tx(app);
             }
             break;
         }

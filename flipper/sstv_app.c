@@ -120,18 +120,32 @@ static void vline_clipped(Canvas* canvas, int x, int y0, int y1) {
     canvas_draw_line(canvas, x, y0, x, y1);
 }
 
-/* What lies under the sheet: the resting dolphin and a word. */
+/* What lies under the sheet: the resting dolphin low on the screen and a speech bubble above. */
 static void draw_under_layer(Canvas* canvas) {
-    canvas_draw_icon(canvas, SHEET_X, SHEET_Y, &I_dolphin_done);
-    canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, SHEET_X + 3, SHEET_Y + 12, "Sent!");
+    canvas_draw_icon(canvas, SHEET_X, 64 - SSTV_PREVIEW_H, &I_dolphin_done);
+    canvas_set_font(canvas, FontSecondary);
+    const char* text = "Sent!";
+    int tw = canvas_string_width(canvas, text);
+    int bx = SHEET_X + 6, by = 1, bw = tw + 8, bh = 12;
+    canvas_draw_rframe(canvas, bx, by, bw, bh, 3);
+    canvas_draw_str(canvas, bx + 4, by + 9, text);
+    /* tail towards the dolphin */
+    canvas_set_color(canvas, ColorWhite);
+    canvas_draw_line(canvas, bx + 5, by + bh - 1, bx + 9, by + bh - 1);
+    canvas_set_color(canvas, ColorBlack);
+    canvas_draw_line(canvas, bx + 5, by + bh - 1, bx + 3, by + bh + 3);
+    canvas_draw_line(canvas, bx + 10, by + bh - 1, bx + 3, by + bh + 3);
 }
 
 /* Top row of the picture. While the intro frames go out (START, previews, schedule) the sheet
  * moves from its resting place up to the top edge; then each transmitted line pushes it out. */
+static int intro_frames(const SstvApp* app) {
+    return SSTV_ILEAVE + (app->coded ? SSTV_INTRO_FRAMES_CODED : SSTV_INTRO_FRAMES);
+}
+
 static int sheet_top(const SstvApp* app) {
     if(app->state == StatePreview) return SHEET_Y;
-    int intro = SSTV_ILEAVE + (app->coded ? SSTV_INTRO_FRAMES_CODED : SSTV_INTRO_FRAMES);
+    int intro = intro_frames(app);
     if(app->frames_sent < intro) return SHEET_Y - SHEET_Y * app->frames_sent / intro;
     return -(app->lines_done * SSTV_PREVIEW_H / SSTV_HEIGHT);
 }
@@ -206,7 +220,8 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     SstvApp* app = ctx;
     furi_mutex_acquire(app->mutex, FuriWaitForever);
     canvas_clear(canvas);
-    if(app->state != StatePreview) draw_under_layer(canvas);
+    /* the layer underneath appears once the sheet is flush with the top edge */
+    if(app->state == StateDone || (app->state == StateTransmit && app->frames_sent >= intro_frames(app))) draw_under_layer(canvas);
     if(app->state != StateDone) draw_sheet(canvas, app->preview, sheet_top(app));
     draw_panel(canvas, app);
     furi_mutex_release(app->mutex);

@@ -294,6 +294,8 @@ int32_t sstv_app_main(void* p) {
             base = base ? base + 1 : full;
             strncpy(app->name, base, sizeof(app->name) - 1);
             app->name[sizeof(app->name) - 1] = 0;
+            char* dot = strrchr(app->name, '.');
+            if(dot && dot != app->name) *dot = 0; /* extension is implied (.pbm) */
         }
         run_viewport(app);
     }

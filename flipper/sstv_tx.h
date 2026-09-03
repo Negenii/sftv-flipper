@@ -2,7 +2,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Called from the timer ISR after each line finishes. `done` is true after the last line.
+/* Called from the timer ISR after each line finishes. `done` is true after line 239 of each
+ * pass; transmission then continues from line 0 until sstv_tx_stop().
  * Only ISR-safe calls are allowed inside (e.g. furi_message_queue_put with timeout 0). */
 typedef void (*SstvTxCallback)(void* ctx, uint16_t line, bool done);
 

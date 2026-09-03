@@ -17,13 +17,12 @@
 typedef enum {
     StatePreview,
     StateTransmit,
-    StateDone,
 } AppState;
 
 typedef enum {
     EvInput,
     EvLine,
-    EvTxDone,
+    EvPassDone,
 } EventType;
 
 typedef struct {
@@ -41,6 +40,7 @@ typedef struct {
     uint8_t* image; /* SSTV_IMAGE_BYTES */
     AppState state;
     uint16_t lines_sent;
+    uint16_t pass; /* 1-based pass number while transmitting */
 } SstvApp;
 
 /* ---- drawing ---- */
@@ -72,15 +72,12 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     char buf[32];
     switch(app->state) {
     case StatePreview:
-        canvas_draw_str(canvas, 2, 62, "OK: send   Back: files");
+        canvas_draw_str(canvas, 2, 62, "OK: send (loops)  Back");
         break;
     case StateTransmit:
-        snprintf(buf, sizeof buf, "TX %u/%u", app->lines_sent, (unsigned)SSTV_HEIGHT);
+        snprintf(buf, sizeof buf, "P%u %u/%u", app->pass, app->lines_sent, (unsigned)SSTV_HEIGHT);
         canvas_draw_str(canvas, 2, 62, buf);
-        elements_progress_bar(canvas, 60, 55, 66, (float)app->lines_sent / SSTV_HEIGHT);
-        break;
-    case StateDone:
-        canvas_draw_str(canvas, 2, 62, "Done.  OK: again   Back");
+        elements_progress_bar(canvas, 62, 55, 64, (float)app->lines_sent / SSTV_HEIGHT);
         break;
     }
     furi_mutex_release(app->mutex);
@@ -97,7 +94,7 @@ static void input_callback(InputEvent* input, void* ctx) {
 /* ISR context */
 static void tx_callback(void* ctx, uint16_t line, bool done) {
     SstvApp* app = ctx;
-    AppEvent ev = {.type = done ? EvTxDone : EvLine, .line = line};
+    AppEvent ev = {.type = done ? EvPassDone : EvLine, .line = line};
     furi_message_queue_put(app->queue, &ev, 0);
 }
 
@@ -142,6 +139,7 @@ static void set_state(SstvApp* app, AppState s) {
     furi_mutex_acquire(app->mutex, FuriWaitForever);
     app->state = s;
     if(s != StateTransmit) app->lines_sent = 0;
+    if(s == StateTransmit) app->pass = 1;
     furi_mutex_release(app->mutex);
     view_port_update(app->vp);
 }
@@ -169,9 +167,12 @@ static void run_viewport(SstvApp* app) {
             furi_mutex_release(app->mutex);
             view_port_update(app->vp);
             break;
-        case EvTxDone:
-            sstv_tx_stop();
-            set_state(app, StateDone);
+        case EvPassDone:
+            furi_mutex_acquire(app->mutex, FuriWaitForever);
+            app->lines_sent = 0;
+            app->pass++;
+            furi_mutex_release(app->mutex);
+            view_port_update(app->vp);
             break;
         case EvInput:
             if(ev.input.type != InputTypeShort) break;
@@ -179,13 +180,11 @@ static void run_viewport(SstvApp* app) {
                 if(app->state == StateTransmit) {
                     sstv_tx_stop();
                     set_state(app, StatePreview);
-                } else if(app->state == StateDone) {
-                    set_state(app, StatePreview);
                 } else {
                     leave = true;
                 }
             } else if(ev.input.key == InputKeyOk) {
-                if(app->state == StatePreview || app->state == StateDone) start_tx(app);
+                if(app->state == StatePreview) start_tx(app);
             }
             break;
         }

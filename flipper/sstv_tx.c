@@ -10,8 +10,14 @@
 #include "sstv_frame.h"
 
 /* The speaker is on TIM16 CH1. furi_hal_speaker_acquire() enables the TIM16 bus clock and
- * routes the pin; we then program the timer ourselves so that frequency changes happen
- * exactly on cycle boundaries from the update interrupt. */
+ * routes the pin; we then program the timer ourselves.
+ *
+ * Symbol timing is done in hardware: the repetition counter (RCR) makes the timer raise one
+ * update event per symbol (after N whole PWM cycles), and ARR/CCR/RCR are written through
+ * their preload registers, so the values programmed during symbol k take effect exactly at
+ * the start of symbol k+1. The ISR therefore runs once per symbol (500 Hz) and only has to
+ * arrive within 2 ms, instead of once per PWM period (up to 4.5 kHz) where any interrupt
+ * latency longer than a period lost cycles and stretched symbols. */
 #define TX_TIMER TIM16
 #define TX_TIMER_CLK_HZ 64000000UL
 
@@ -26,9 +32,9 @@ typedef struct {
     uint8_t* frames; /* SSTV_HEIGHT * SSTV_FRAME_BYTES, pre-packed */
     volatile TxPhase phase;
     volatile uint16_t line;
-    uint16_t bit;
-    uint16_t leader_left; /* alternating 0/1 symbols still to send */
-    uint32_t cycles_left;
+    uint16_t symbol; /* next symbol index within the frame */
+    uint16_t leader_left; /* leader symbols still to send (cycling tone 0,1,2,3) */
+    int pending_line; /* line whose last symbol was just programmed, -1 none */
     SstvTxCallback cb;
     void* ctx;
     bool running;
@@ -36,28 +42,57 @@ typedef struct {
 
 static SstvTx tx = {0};
 
-static const uint32_t arr_bit[2] = {
-    TX_TIMER_CLK_HZ / SSTV_F0_HZ - 1, /* 31999 -> 2000.00 Hz */
-    TX_TIMER_CLK_HZ / SSTV_F1_HZ - 1, /* 21332 -> 3000.05 Hz */
-};
-static const uint32_t cycles_bit[2] = {
-    SSTV_F0_HZ * SSTV_BIT_US / 1000000, /* 4 at 2 ms */
-    SSTV_F1_HZ * SSTV_BIT_US / 1000000, /* 6 at 2 ms */
-};
-#define ARR_SYNC (TX_TIMER_CLK_HZ / SSTV_FSYNC_HZ - 1) /* 15999 */
-#define CYCLES_SYNC (SSTV_FSYNC_HZ * SSTV_SYNC_US / 1000000) /* 32 at 8 ms */
+static const int tone_hz[SSTV_NUM_TONES] = SSTV_TONES_INIT;
+#define ARR_FOR(hz) (TX_TIMER_CLK_HZ / (uint32_t)(hz) - 1)
+#define CYCLES_FOR(hz, us) ((uint32_t)(hz) * (uint32_t)(us) / 1000000UL)
+#define ARR_SYNC ARR_FOR(SSTV_FSYNC_HZ) /* 12799 -> 5000.0 Hz */
+#define CYCLES_SYNC CYCLES_FOR(SSTV_FSYNC_HZ, SSTV_SYNC_US) /* 80 at 16 ms, fits 8-bit RCR */
 
-/* Called at the start of a period (CNT just wrapped to 0): writing ARR/CCR without preload
- * applies to the period that has just begun. */
-static inline void tx_set_tone(uint32_t arr, uint32_t cycles) {
-    LL_TIM_SetAutoReload(TX_TIMER, arr);
-    LL_TIM_OC_SetCompareCH1(TX_TIMER, (arr + 1) / 2);
-    tx.cycles_left = cycles;
+static inline void tone_settings(int v, uint32_t* arr, uint32_t* cycles) {
+    *arr = ARR_FOR(tone_hz[v]); /* 3500 -> 18284 (3500.1 Hz), 4000 -> 15999, 5500 -> 11635, 6000 -> 10665 */
+    *cycles = CYCLES_FOR(tone_hz[v], SSTV_SYMBOL_US); /* 14, 16, 22, 24 at 4 ms */
 }
 
-static inline void tx_emit_bit(void) {
-    int b = sstv_frame_bit(tx.frames + tx.line * SSTV_FRAME_BYTES, tx.bit);
-    tx_set_tone(arr_bit[b], cycles_bit[b]);
+/* Advances the sequencer by one symbol and returns its PWM settings. */
+static void tx_next_symbol(uint32_t* arr, uint32_t* cycles) {
+    switch(tx.phase) {
+    case PhaseLeader:
+        if(tx.leader_left > 0) {
+            tx.leader_left--;
+            tone_settings(tx.leader_left % SSTV_NUM_TONES, arr, cycles);
+            return;
+        }
+        tx.phase = PhaseSync;
+        /* fall through */
+    case PhaseSync:
+        tx.phase = PhaseBits;
+        tx.symbol = 0;
+        *arr = ARR_SYNC;
+        *cycles = CYCLES_SYNC;
+        return;
+    case PhaseBits:
+        tone_settings(sstv_frame_symbol(tx.frames + tx.line * SSTV_FRAME_BYTES, tx.symbol), arr, cycles);
+        tx.symbol++;
+        if(tx.symbol >= SSTV_SYMBOLS_PER_FRAME) {
+            tx.pending_line = tx.line;
+            /* Loop forever: the receiver keeps good rows, so lines lost to noise on one
+             * pass are filled in on the next. The app stops us on Back. */
+            tx.line = (uint16_t)((tx.line + 1) % SSTV_HEIGHT);
+            tx.phase = PhaseSync;
+        }
+        return;
+    case PhaseDone:
+    default:
+        tone_settings(0, arr, cycles);
+        return;
+    }
+}
+
+/* Writes the preload registers; the values take effect at the next update event. */
+static inline void tx_program(uint32_t arr, uint32_t cycles) {
+    LL_TIM_SetAutoReload(TX_TIMER, arr);
+    LL_TIM_OC_SetCompareCH1(TX_TIMER, (arr + 1) / 2);
+    LL_TIM_SetRepetitionCounter(TX_TIMER, cycles - 1);
 }
 
 static void tx_isr(void* context) {
@@ -65,48 +100,16 @@ static void tx_isr(void* context) {
     if(!LL_TIM_IsActiveFlag_UPDATE(TX_TIMER)) return; /* TIM1 shares this vector */
     LL_TIM_ClearFlag_UPDATE(TX_TIMER);
     if(tx.phase == PhaseDone) return;
-    if(--tx.cycles_left > 0) return;
 
-    switch(tx.phase) {
-    case PhaseLeader:
-        if(tx.leader_left > 0) {
-            tx.leader_left--;
-            int b = tx.leader_left & 1;
-            tx_set_tone(arr_bit[b], cycles_bit[b]);
-        } else {
-            tx.phase = PhaseSync;
-            tx_set_tone(ARR_SYNC, CYCLES_SYNC);
-        }
-        break;
-    case PhaseSync:
-        tx.phase = PhaseBits;
-        tx.bit = 0;
-        tx_emit_bit();
-        break;
-    case PhaseBits: {
-        tx.bit++;
-        if(tx.bit < SSTV_FRAME_BITS) {
-            tx_emit_bit();
-            break;
-        }
-        uint16_t finished = tx.line;
-        tx.line++;
-        if(tx.line < SSTV_HEIGHT) {
-            tx.phase = PhaseSync;
-            tx_set_tone(ARR_SYNC, CYCLES_SYNC);
-            if(tx.cb) tx.cb(tx.ctx, finished, false);
-        } else {
-            tx.phase = PhaseDone;
-            LL_TIM_DisableIT_UPDATE(TX_TIMER);
-            LL_TIM_DisableAllOutputs(TX_TIMER);
-            LL_TIM_DisableCounter(TX_TIMER);
-            if(tx.cb) tx.cb(tx.ctx, finished, true);
-        }
-        break;
-    }
-    case PhaseDone:
-    default:
-        break;
+    /* A symbol has just started with the values we programmed last time; queue the next. */
+    uint32_t arr, cycles;
+    tx_next_symbol(&arr, &cycles);
+    tx_program(arr, cycles);
+
+    if(tx.pending_line >= 0) {
+        int finished = tx.pending_line;
+        tx.pending_line = -1;
+        if(tx.cb) tx.cb(tx.ctx, (uint16_t)finished, finished == SSTV_HEIGHT - 1);
     }
 }
 
@@ -122,32 +125,40 @@ bool sstv_tx_start(const uint8_t* image_bits, SstvTxCallback cb, void* ctx) {
     tx.cb = cb;
     tx.ctx = ctx;
     tx.line = 0;
-    tx.bit = 0;
+    tx.symbol = 0;
+    tx.pending_line = -1;
     tx.phase = PhaseLeader;
-    tx.leader_left = SSTV_LEADER_SYMBOLS - 1;
-    tx.cycles_left = cycles_bit[1]; /* first leader symbol, matching the timer's initial ARR */
+    tx.leader_left = SSTV_LEADER_SYMBOLS;
+
+    /* Symbol 0 goes straight into the active registers. */
+    uint32_t arr0, cyc0;
+    tx_next_symbol(&arr0, &cyc0);
 
     LL_TIM_InitTypeDef init = {0};
     init.Prescaler = 0;
     init.CounterMode = LL_TIM_COUNTERMODE_UP;
-    init.Autoreload = arr_bit[1];
+    init.Autoreload = arr0;
     init.ClockDivision = LL_TIM_CLOCKDIVISION_DIV1;
-    init.RepetitionCounter = 0;
+    init.RepetitionCounter = cyc0 - 1;
     LL_TIM_Init(TX_TIMER, &init);
 
     LL_TIM_OC_InitTypeDef oc = {0};
     oc.OCMode = LL_TIM_OCMODE_PWM1;
     oc.OCState = LL_TIM_OCSTATE_ENABLE;
     oc.OCNState = LL_TIM_OCSTATE_DISABLE;
-    oc.CompareValue = (arr_bit[1] + 1) / 2;
+    oc.CompareValue = (arr0 + 1) / 2;
     oc.OCPolarity = LL_TIM_OCPOLARITY_HIGH;
     oc.OCNPolarity = LL_TIM_OCPOLARITY_HIGH;
     oc.OCIdleState = LL_TIM_OCIDLESTATE_LOW;
     oc.OCNIdleState = LL_TIM_OCIDLESTATE_LOW;
     LL_TIM_OC_Init(TX_TIMER, LL_TIM_CHANNEL_CH1, &oc);
 
-    LL_TIM_DisableARRPreload(TX_TIMER);
-    LL_TIM_OC_DisablePreload(TX_TIMER, LL_TIM_CHANNEL_CH1);
+    /* From now on ARR/CCR are buffered: symbol 1 is queued behind symbol 0. */
+    LL_TIM_EnableARRPreload(TX_TIMER);
+    LL_TIM_OC_EnablePreload(TX_TIMER, LL_TIM_CHANNEL_CH1);
+    uint32_t arr1, cyc1;
+    tx_next_symbol(&arr1, &cyc1);
+    tx_program(arr1, cyc1);
 
     LL_TIM_ClearFlag_UPDATE(TX_TIMER); /* LL_TIM_Init generated one */
     furi_hal_interrupt_set_isr(FuriHalInterruptIdTim1UpTim16, tx_isr, NULL);

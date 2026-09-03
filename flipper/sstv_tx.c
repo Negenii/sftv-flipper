@@ -44,23 +44,26 @@ typedef struct {
 static SstvTx tx = {0};
 
 static const int tone_hz[SSTV_NUM_TONES] = SSTV_TONES_INIT;
+static const int tone_duty[SSTV_NUM_TONES] = SSTV_TONE_DUTY_PCT_INIT;
 #define ARR_FOR(hz) (TX_TIMER_CLK_HZ / (uint32_t)(hz) - 1)
 #define CYCLES_FOR(hz, us) ((uint32_t)(hz) * (uint32_t)(us) / 1000000UL)
 #define ARR_SYNC ARR_FOR(SSTV_FSYNC_HZ) /* 12799 -> 5000.0 Hz */
 #define CYCLES_SYNC CYCLES_FOR(SSTV_FSYNC_HZ, SSTV_SYNC_US) /* 80 at 16 ms, fits 8-bit RCR */
 
-static inline void tone_settings(int v, uint32_t* arr, uint32_t* cycles) {
-    *arr = ARR_FOR(tone_hz[v]); /* 3000 -> 21332 (3000.05 Hz), 3500 -> 18284, 4000 -> 15999, 4500 -> 14221 */
-    *cycles = CYCLES_FOR(tone_hz[v], SSTV_SYMBOL_US); /* 12, 14, 16, 18 at 4 ms */
+static inline void tone_settings(int v, uint32_t* arr, uint32_t* cycles, uint32_t* duty_pct) {
+    *arr = ARR_FOR(tone_hz[v]); /* 2500 -> 25599, 3000 -> 21332 (3000.05 Hz), 3500 -> 18284, 4000 -> 15999 */
+    *cycles = CYCLES_FOR(tone_hz[v], SSTV_SYMBOL_US); /* 10, 12, 14, 16 at 4 ms */
+    *duty_pct = (uint32_t)tone_duty[v];
 }
 
 /* Advances the sequencer by one symbol and returns its PWM settings. */
-static void tx_next_symbol(uint32_t* arr, uint32_t* cycles) {
+static void tx_next_symbol(uint32_t* arr, uint32_t* cycles, uint32_t* duty_pct) {
+    *duty_pct = SSTV_SYNC_DUTY_PCT;
     switch(tx.phase) {
     case PhaseLeader:
         if(tx.leader_left > 0) {
             tx.leader_left--;
-            tone_settings(tx.leader_left % SSTV_NUM_TONES, arr, cycles);
+            tone_settings(tx.leader_left % SSTV_NUM_TONES, arr, cycles, duty_pct);
             return;
         }
         tx.phase = PhaseSync;
@@ -72,7 +75,7 @@ static void tx_next_symbol(uint32_t* arr, uint32_t* cycles) {
         *cycles = CYCLES_SYNC;
         return;
     case PhaseBits:
-        tone_settings(sstv_frame_symbol(tx.frames + tx.line * SSTV_FRAME_BYTES, tx.symbol), arr, cycles);
+        tone_settings(sstv_frame_symbol(tx.frames + tx.line * SSTV_FRAME_BYTES, tx.symbol), arr, cycles, duty_pct);
         tx.symbol++;
         if(tx.symbol >= SSTV_SYMBOLS_PER_FRAME) {
             tx.pending_line = tx.line;
@@ -87,15 +90,15 @@ static void tx_next_symbol(uint32_t* arr, uint32_t* cycles) {
         return;
     case PhaseDone:
     default:
-        tone_settings(0, arr, cycles);
+        tone_settings(0, arr, cycles, duty_pct);
         return;
     }
 }
 
 /* Writes the preload registers; the values take effect at the next update event. */
-static inline void tx_program(uint32_t arr, uint32_t cycles) {
+static inline void tx_program(uint32_t arr, uint32_t cycles, uint32_t duty_pct) {
     LL_TIM_SetAutoReload(TX_TIMER, arr);
-    LL_TIM_OC_SetCompareCH1(TX_TIMER, (arr + 1) / 2);
+    LL_TIM_OC_SetCompareCH1(TX_TIMER, (arr + 1) * duty_pct / 100);
     LL_TIM_SetRepetitionCounter(TX_TIMER, cycles - 1);
 }
 
@@ -106,9 +109,9 @@ static void tx_isr(void* context) {
     if(tx.phase == PhaseDone) return;
 
     /* A symbol has just started with the values we programmed last time; queue the next. */
-    uint32_t arr, cycles;
-    tx_next_symbol(&arr, &cycles);
-    tx_program(arr, cycles);
+    uint32_t arr, cycles, duty;
+    tx_next_symbol(&arr, &cycles, &duty);
+    tx_program(arr, cycles, duty);
 
     if(tx.pending_line >= 0) {
         int finished = tx.pending_line;
@@ -139,8 +142,8 @@ bool sstv_tx_start(const uint8_t* image_bits, bool loop, SstvTxCallback cb, void
     tx.leader_left = SSTV_LEADER_SYMBOLS;
 
     /* Symbol 0 goes straight into the active registers. */
-    uint32_t arr0, cyc0;
-    tx_next_symbol(&arr0, &cyc0);
+    uint32_t arr0, cyc0, duty0;
+    tx_next_symbol(&arr0, &cyc0, &duty0);
 
     LL_TIM_InitTypeDef init = {0};
     init.Prescaler = 0;
@@ -154,7 +157,7 @@ bool sstv_tx_start(const uint8_t* image_bits, bool loop, SstvTxCallback cb, void
     oc.OCMode = LL_TIM_OCMODE_PWM1;
     oc.OCState = LL_TIM_OCSTATE_ENABLE;
     oc.OCNState = LL_TIM_OCSTATE_DISABLE;
-    oc.CompareValue = (arr0 + 1) / 2;
+    oc.CompareValue = (arr0 + 1) * duty0 / 100;
     oc.OCPolarity = LL_TIM_OCPOLARITY_HIGH;
     oc.OCNPolarity = LL_TIM_OCPOLARITY_HIGH;
     oc.OCIdleState = LL_TIM_OCIDLESTATE_LOW;
@@ -164,9 +167,9 @@ bool sstv_tx_start(const uint8_t* image_bits, bool loop, SstvTxCallback cb, void
     /* From now on ARR/CCR are buffered: symbol 1 is queued behind symbol 0. */
     LL_TIM_EnableARRPreload(TX_TIMER);
     LL_TIM_OC_EnablePreload(TX_TIMER, LL_TIM_CHANNEL_CH1);
-    uint32_t arr1, cyc1;
-    tx_next_symbol(&arr1, &cyc1);
-    tx_program(arr1, cyc1);
+    uint32_t arr1, cyc1, duty1;
+    tx_next_symbol(&arr1, &cyc1, &duty1);
+    tx_program(arr1, cyc1, duty1);
 
     LL_TIM_ClearFlag_UPDATE(TX_TIMER); /* LL_TIM_Init generated one */
     furi_hal_interrupt_set_isr(FuriHalInterruptIdTim1UpTim16, tx_isr, NULL);

@@ -61,8 +61,8 @@ static inline void tone_settings(int v, uint32_t* arr, uint32_t* cycles, uint32_
         *duty_pct = 0;
         return;
     }
-    *arr = ARR_FOR(tone_hz[v]); /* 2500 -> 25599, 3000 -> 21332 (3000.05 Hz), 3500 -> 18284 */
-    *cycles = CYCLES_FOR(tone_hz[v], SSTV_SYMBOL_US); /* 10, 12, 14 at 4 ms */
+    *arr = ARR_FOR(tone_hz[v]); /* 3000 -> 21332 (3000.05 Hz), 3500 -> 18284, 4000 -> 15999 */
+    *cycles = CYCLES_FOR(tone_hz[v], SSTV_SYMBOL_US); /* 12, 14, 16 at 4 ms */
     *duty_pct = (uint32_t)tone_duty[v];
 }
 

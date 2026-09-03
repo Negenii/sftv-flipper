@@ -127,8 +127,16 @@ static void draw_under_layer(Canvas* canvas) {
     canvas_draw_str(canvas, SHEET_X + 3, SHEET_Y + 12, "Sent!");
 }
 
-static void draw_sheet(Canvas* canvas, const uint8_t* preview, int lines_done) {
-    int y0 = SHEET_Y - lines_done * SSTV_PREVIEW_H / SSTV_HEIGHT; /* top row of the picture */
+/* Top row of the picture. While the intro frames go out (START, previews, schedule) the sheet
+ * moves from its resting place up to the top edge; then each transmitted line pushes it out. */
+static int sheet_top(const SstvApp* app) {
+    if(app->state == StatePreview) return SHEET_Y;
+    int intro = SSTV_ILEAVE + (app->coded ? SSTV_INTRO_FRAMES_CODED : SSTV_INTRO_FRAMES);
+    if(app->frames_sent < intro) return SHEET_Y - SHEET_Y * app->frames_sent / intro;
+    return -(app->lines_done * SSTV_PREVIEW_H / SSTV_HEIGHT);
+}
+
+static void draw_sheet(Canvas* canvas, const uint8_t* preview, int y0) {
     /* paper: white box (clipped) so it covers the layer underneath */
     int top = y0 < 0 ? 0 : y0, bottom = y0 + SSTV_PREVIEW_H - 1;
     if(bottom > SHEET_BOTTOM) bottom = SHEET_BOTTOM;
@@ -199,7 +207,7 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     furi_mutex_acquire(app->mutex, FuriWaitForever);
     canvas_clear(canvas);
     if(app->state != StatePreview) draw_under_layer(canvas);
-    if(app->state != StateDone) draw_sheet(canvas, app->preview, app->state == StatePreview ? 0 : app->lines_done);
+    if(app->state != StateDone) draw_sheet(canvas, app->preview, sheet_top(app));
     draw_panel(canvas, app);
     furi_mutex_release(app->mutex);
 }

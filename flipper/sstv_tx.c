@@ -29,7 +29,8 @@ typedef enum {
 } TxPhase;
 
 typedef struct {
-    uint8_t* frames; /* SSTV_NUM_SEGS * SSTV_FRAME_BYTES physical frames, interleaved */
+    uint8_t* frames; /* physical frames, interleaved (SSTV_MAX_FRAMES capacity) */
+    uint16_t total; /* physical frames for this image */
     volatile TxPhase phase;
     volatile uint16_t line; /* physical frame index */
     uint16_t symbol; /* next symbol index within the frame */
@@ -92,7 +93,7 @@ static void tx_next_symbol(uint32_t* arr, uint32_t* cycles, uint32_t* duty_pct) 
         if(tx.symbol >= SSTV_SYMBOLS_PER_FRAME) {
             tx.pending_line = tx.line;
             tx.line++;
-            if(tx.line >= SSTV_NUM_SEGS) {
+            if(tx.line >= tx.total) {
                 tx.line = 0;
                 tx.phase = tx.loop ? PhaseSync : PhaseDone;
             } else {
@@ -129,7 +130,7 @@ static void tx_isr(void* context) {
     if(tx.pending_line >= 0) {
         int finished = tx.pending_line;
         tx.pending_line = -1;
-        bool last = finished == SSTV_NUM_SEGS - 1;
+        bool last = finished == tx.total - 1;
         if(last && !tx.loop) {
             /* The last symbol is playing now; the programmed "next" symbol (tone 0) must not
              * start: stop outputs at the coming update instead of feeding more symbols. */
@@ -143,8 +144,8 @@ bool sstv_tx_start(const uint8_t* image_bits, bool loop, SstvTxCallback cb, void
     if(tx.running) return false;
     if(!furi_hal_speaker_acquire(1000)) return false;
 
-    tx.frames = malloc(SSTV_NUM_SEGS * SSTV_FRAME_BYTES);
-    sstv_build_physical(image_bits, tx.frames);
+    tx.frames = malloc(SSTV_MAX_FRAMES * SSTV_FRAME_BYTES);
+    tx.total = (uint16_t)sstv_build_physical(image_bits, tx.frames);
     tx.loop = loop;
     tx.cb = cb;
     tx.ctx = ctx;
@@ -212,6 +213,10 @@ void sstv_tx_stop(void) {
 
 bool sstv_tx_is_running(void) {
     return tx.running;
+}
+
+int sstv_tx_total_frames(void) {
+    return tx.running ? tx.total : 0;
 }
 
 int sstv_tx_current_symbol(void) {

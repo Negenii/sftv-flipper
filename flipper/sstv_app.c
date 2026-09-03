@@ -42,6 +42,7 @@ typedef struct {
     uint8_t* image; /* SSTV_IMAGE_BYTES */
     AppState state;
     uint16_t frames_sent;
+    uint16_t frames_total;
     FuriThread* led_thread; /* follows the symbol on the speaker while transmitting */
     volatile bool led_run;
 } SstvApp;
@@ -122,9 +123,10 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         canvas_draw_str(canvas, 2, 62, "OK: send   Back: files");
         break;
     case StateTransmit:
-        snprintf(buf, sizeof buf, "TX %u/%u", app->frames_sent, (unsigned)SSTV_NUM_SEGS);
+        snprintf(buf, sizeof buf, "TX %u/%u", app->frames_sent, app->frames_total);
         canvas_draw_str(canvas, 2, 62, buf);
-        elements_progress_bar(canvas, 62, 55, 64, (float)app->frames_sent / SSTV_NUM_SEGS);
+        elements_progress_bar(
+            canvas, 62, 55, 64, app->frames_total ? (float)app->frames_sent / app->frames_total : 0.0f);
         break;
     case StateDone:
         canvas_draw_str(canvas, 2, 62, "Done.  OK: again   Back");
@@ -200,6 +202,7 @@ static void set_state(SstvApp* app, AppState s) {
 
 static void start_tx(SstvApp* app) {
     if(sstv_tx_start(app->image, false, tx_callback, app)) {
+        app->frames_total = (uint16_t)sstv_tx_total_frames();
         set_state(app, StateTransmit);
     } else {
         FURI_LOG_E(TAG, "speaker busy");

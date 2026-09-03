@@ -11,7 +11,7 @@ App(
     fap_private_libs=[
         Lib(
             name="common",
-            sources=["crc8.c", "rs.c", "sstv_frame.c", "pbm.c"],
+            sources=["crc8.c", "rs.c", "sstv_codec.c", "sstv_frame.c", "pbm.c"],
         ),
     ],
 )

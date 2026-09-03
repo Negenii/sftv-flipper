@@ -261,15 +261,15 @@ static void draw_browse(Canvas* canvas, SstvApp* app) {
     for(int k = 0; k < TILES_PER_PAGE; k++) {
         int idx = page + k;
         if(idx >= app->file_count) break;
-        /* pictures at x = 2, 44, 86: every tile framed, the frames touching so a 2 px line
-         * separates neighbours; the cursor adds a second frame outside */
-        int x = 2 + k * 42, y = 17;
+        /* pictures at x = 1, 44, 87, each framed: two empty pixels between the frames;
+         * the cursor thickens its frame inwards */
+        int x = 1 + k * 43, y = 17;
         const uint8_t* t = app->thumbs[idx];
         for(int py = 0; py < SSTV_TINY_H; py++)
             for(int px = 0; px < SSTV_TINY_W; px++)
                 if(t[py * SSTV_TINY_LINE_BYTES + (px >> 3)] & (0x80 >> (px & 7))) canvas_draw_dot(canvas, x + px, y + py);
         canvas_draw_frame(canvas, x - 1, y - 1, SSTV_TINY_W + 2, SSTV_TINY_H + 2);
-        if(idx == app->file_index) canvas_draw_frame(canvas, x - 2, y - 2, SSTV_TINY_W + 4, SSTV_TINY_H + 4);
+        if(idx == app->file_index) canvas_draw_frame(canvas, x, y, SSTV_TINY_W, SSTV_TINY_H);
         fit_name(canvas, buf, sizeof buf, app->files[idx], SSTV_TINY_W + 2);
         canvas_draw_str(canvas, x + (SSTV_TINY_W - (int)canvas_string_width(canvas, buf)) / 2, y + SSTV_TINY_H + 12, buf);
     }

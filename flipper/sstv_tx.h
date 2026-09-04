@@ -27,6 +27,17 @@ bool sstv_tx_is_coded(void);
 /* Safe to call at any time, including after the transmitter finished on its own. */
 void sstv_tx_stop(void);
 
+/* Pause after the current data frame: transmits a PAUSE control block, then holds the speaker
+ * silent. Safe to call from any thread while transmitting an image or a note (not the test). */
+void sstv_tx_pause(void);
+
+/* Resume from where it paused: a short re-calibration leader, a RESUME control block carrying
+ * the next frame index, then the rest of the pass. No effect unless currently paused. */
+void sstv_tx_resume(void);
+
+/* True while the transmitter is holding on a pause (the PAUSE block has been sent). */
+bool sstv_tx_is_paused(void);
+
 bool sstv_tx_is_running(void);
 
 /* Physical frames in the current transmission (depends on how well the image compresses). */

@@ -25,6 +25,7 @@ typedef enum {
     PhaseLeader,
     PhaseSync,
     PhaseBits,
+    PhasePaused,
     PhaseDone,
 } TxPhase;
 
@@ -41,6 +42,14 @@ typedef struct {
     int pending_line; /* physical frame whose last symbol was just programmed, -1 none */
     bool loop; /* restart from frame 0 after the last one */
     bool test; /* tone test: symbols from test_pattern with test_tone_hz instead of frames */
+    /* pause/resume: a prebuilt control block (4 interleaved physical frames) is played
+     * between data frames; then the sequencer either holds silent (pause) or continues. */
+    uint8_t ctrl[SSTV_ILEAVE * SSTV_FRAME_BYTES];
+    volatile int ctrl_line; /* frame within the control block being sent, -1 = not sending one */
+    volatile bool ctrl_is_pause; /* the control block in flight is PAUSE (else RESUME) */
+    volatile bool pause_pending; /* app asked to pause; honoured at the next data-frame boundary */
+    volatile bool resume_pending; /* app asked to resume; honoured from the paused hold */
+    volatile bool paused; /* holding silent after a PAUSE block */
     uint8_t test_pattern[SSTV_SYMBOLS_PER_FRAME];
     volatile int playing; /* symbol now on the speaker (see sstv_tx_current_symbol) */
     int queued; /* symbol programmed to start at the next update event */
@@ -121,21 +130,51 @@ static void tx_next_symbol(uint32_t* arr, uint32_t* cycles, uint32_t* duty_pct) 
         if(tx.test) {
             tx.queued = tx.test_pattern[tx.symbol];
             test_tone_settings(tx.queued, arr, cycles, duty_pct);
+        } else if(tx.ctrl_line >= 0) {
+            tx.queued = sstv_frame_symbol(tx.ctrl + tx.ctrl_line * SSTV_FRAME_BYTES, tx.symbol);
+            tone_settings(tx.queued, arr, cycles, duty_pct);
         } else {
             tx.queued = sstv_frame_symbol(tx.frames + tx.line * SSTV_FRAME_BYTES, tx.symbol);
             tone_settings(tx.queued, arr, cycles, duty_pct);
         }
         tx.symbol++;
         if(tx.symbol >= SSTV_SYMBOLS_PER_FRAME) {
+            if(tx.ctrl_line >= 0) {
+                /* a control-block frame just finished; it is not counted in the pass */
+                tx.ctrl_line++;
+                if(tx.ctrl_line >= SSTV_ILEAVE) {
+                    tx.ctrl_line = -1;
+                    if(tx.ctrl_is_pause) {
+                        tx.paused = true;
+                        tx.phase = PhasePaused;
+                    } else {
+                        tx.phase = PhaseSync; /* RESUME sent: play the rest of the pass */
+                    }
+                } else {
+                    tx.phase = PhaseSync;
+                }
+                return;
+            }
             tx.pending_line = tx.line;
             tx.line++;
             if(tx.line >= tx.total) {
                 tx.line = 0;
                 tx.phase = tx.loop ? PhaseSync : PhaseDone;
+            } else if(tx.pause_pending) {
+                /* honour the pause between data frames: send the PAUSE block, then hold */
+                tx.pause_pending = false;
+                tx.ctrl_line = 0;
+                tx.ctrl_is_pause = true;
+                tx.phase = PhaseSync;
             } else {
                 tx.phase = PhaseSync;
             }
         }
+        return;
+    case PhasePaused:
+        /* hold silent; the resume trigger in the ISR flips us back to PhaseLeader */
+        tone_settings(0, arr, cycles, duty_pct);
+        tx.queued = 0;
         return;
     case PhaseDone:
     default:
@@ -159,6 +198,15 @@ static void tx_isr(void* context) {
 
     /* A symbol has just started with the values we programmed last time; queue the next. */
     tx.playing = tx.queued;
+    if(tx.phase == PhasePaused && tx.resume_pending) {
+        /* leave the hold: a short leader re-calibrates the receiver, then the RESUME block */
+        tx.resume_pending = false;
+        tx.paused = false;
+        tx.ctrl_line = 0;
+        tx.ctrl_is_pause = false;
+        tx.leader_left = SSTV_RESUME_LEADER_SYMBOLS;
+        tx.phase = PhaseLeader;
+    }
     uint32_t arr, cycles, duty;
     tx_next_symbol(&arr, &cycles, &duty);
     tx_program(arr, cycles, duty);
@@ -185,6 +233,11 @@ static bool tx_run(bool leader, SstvTxCallback cb, void* ctx) {
     tx.pending_line = -1;
     tx.phase = PhaseLeader;
     tx.leader_left = leader ? SSTV_LEADER_SYMBOLS : 0;
+    tx.ctrl_line = -1;
+    tx.ctrl_is_pause = false;
+    tx.pause_pending = false;
+    tx.resume_pending = false;
+    tx.paused = false;
 
     /* Symbol 0 goes straight into the active registers. */
     uint32_t arr0, cyc0, duty0;
@@ -273,6 +326,36 @@ void sstv_tx_stop(void) {
     free(tx.lines_after);
     tx.lines_after = NULL;
     tx.running = false;
+}
+
+/* Builds a control block (4 identical META frames, interleaved) into tx.ctrl on the caller's
+ * thread, so the RS encode never runs inside the ISR. */
+static void build_ctrl(int subtype, uint16_t arg) {
+    uint8_t logical[SSTV_ILEAVE * SSTV_FRAME_BYTES];
+    uint8_t meta[SSTV_PAYLOAD_BYTES];
+    memset(meta, 0, sizeof meta);
+    meta[0] = (uint8_t)subtype;
+    meta[1] = (uint8_t)(arg & 0xFF);
+    meta[2] = (uint8_t)(arg >> 8);
+    for(int i = 0; i < SSTV_ILEAVE; i++)
+        sstv_frame_pack(sstv_hdr(SSTV_FT_META, 0), meta, logical + i * SSTV_FRAME_BYTES);
+    sstv_interleave(logical, tx.ctrl);
+}
+
+void sstv_tx_pause(void) {
+    if(!tx.running || tx.test || tx.paused || tx.pause_pending) return;
+    build_ctrl(SSTV_META_PAUSE, tx.line);
+    tx.pause_pending = true; /* the ISR starts the block at the next data-frame boundary */
+}
+
+void sstv_tx_resume(void) {
+    if(!tx.running || !tx.paused || tx.resume_pending) return;
+    build_ctrl(SSTV_META_RESUME, tx.line); /* tx.line = the next physical frame we will play */
+    tx.resume_pending = true;
+}
+
+bool sstv_tx_is_paused(void) {
+    return tx.running && tx.paused;
 }
 
 bool sstv_tx_is_running(void) {

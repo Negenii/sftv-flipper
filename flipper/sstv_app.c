@@ -72,7 +72,12 @@ static int32_t led_thread_fn(void* ctx) {
     SstvApp* app = ctx;
     int last = -99;
     bool last_parity = false;
+    int ui_tick = 0;
     while(app->led_run) {
+        if(++ui_tick >= 100) { /* ~200 ms: keep the panel fresh even during the paused hold */
+            ui_tick = 0;
+            view_port_update(app->vp);
+        }
         int sym = sstv_tx_current_symbol();
         bool parity = sstv_tx_current_is_parity(); /* parity frames glow green instead of blue */
         if(sym != last || parity != last_parity) {
@@ -209,7 +214,8 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
         hint(canvas, &I_back_10px, 10, "files", 63);
         break;
     case StateTransmit: {
-        canvas_draw_str(canvas, PANEL_X, 9, app->coded ? "TX zip" : "TX raw");
+        bool paused = sstv_tx_is_paused();
+        canvas_draw_str(canvas, PANEL_X, 9, paused ? "Paused" : app->coded ? "TX zip" : "TX raw");
         float p = app->frames_total ? (float)app->frames_sent / app->frames_total : 0.0f;
         elements_progress_bar(canvas, PANEL_X, 12, w, p);
         if(app->frames_total > 200) {
@@ -225,7 +231,12 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
         uint32_t left_s = (uint32_t)(app->frames_total - app->frames_sent) * (SSTV_PHYS_US / 1000) / 1000;
         snprintf(buf, sizeof buf, "~%lu:%02lu", (unsigned long)(left_s / 60), (unsigned long)(left_s % 60));
         canvas_draw_str(canvas, PANEL_X, 42, buf);
-        hint(canvas, &I_back_10px, 10, "stop", 63);
+        if(paused) {
+            hint(canvas, &I_Ok_btn_9x9, 9, "resume", 52);
+            hint(canvas, &I_back_10px, 10, "stop", 63);
+        } else {
+            hint(canvas, &I_back_10px, 10, "pause", 63);
+        }
         break;
     }
     case StateDone: {
@@ -507,14 +518,28 @@ static void run_viewport(SstvApp* app) {
                 if(app->state == StateTest) {
                     sstv_tx_stop();
                     set_state(app, StateBrowse);
-                } else if(app->state == StateTransmit || app->state == StateDone) {
+                } else if(app->state == StateTransmit) {
+                    /* first Back pauses; while paused, Back stops */
+                    if(sstv_tx_is_paused()) {
+                        sstv_tx_stop();
+                        set_state(app, StatePreview);
+                    } else {
+                        sstv_tx_pause();
+                        view_port_update(app->vp);
+                    }
+                } else if(app->state == StateDone) {
                     sstv_tx_stop();
                     set_state(app, StatePreview);
                 } else {
                     set_state(app, StateBrowse);
                 }
             } else if(ev.input.key == InputKeyOk) {
-                if(app->state == StatePreview || app->state == StateDone) start_tx(app);
+                if(app->state == StateTransmit && sstv_tx_is_paused()) {
+                    sstv_tx_resume();
+                    view_port_update(app->vp);
+                } else if(app->state == StatePreview || app->state == StateDone) {
+                    start_tx(app);
+                }
             }
             break;
         }

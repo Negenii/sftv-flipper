@@ -212,8 +212,15 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
         canvas_draw_str(canvas, PANEL_X, 9, app->coded ? "TX zip" : "TX raw");
         float p = app->frames_total ? (float)app->frames_sent / app->frames_total : 0.0f;
         elements_progress_bar(canvas, PANEL_X, 12, w, p);
-        int pct10 = app->frames_total ? (int)((uint32_t)app->frames_sent * 1000u / app->frames_total) : 0;
-        snprintf(buf, sizeof buf, "%d.%d%%", pct10 / 10, pct10 % 10);
+        if(app->frames_total > 200) {
+            /* tenths matter only on long passes (big uncompressed image); on a short one
+             * each frame is ~1 %, so the decimal is noise */
+            int pct10 = (int)((uint32_t)app->frames_sent * 1000u / app->frames_total);
+            snprintf(buf, sizeof buf, "%d.%d%%", pct10 / 10, pct10 % 10);
+        } else {
+            int pct = app->frames_total ? (int)((uint32_t)app->frames_sent * 100u / app->frames_total) : 0;
+            snprintf(buf, sizeof buf, "%d%%", pct);
+        }
         canvas_draw_str(canvas, PANEL_X, 32, buf);
         uint32_t left_s = (uint32_t)(app->frames_total - app->frames_sent) * (SSTV_PHYS_US / 1000) / 1000;
         snprintf(buf, sizeof buf, "~%lu:%02lu", (unsigned long)(left_s / 60), (unsigned long)(left_s % 60));

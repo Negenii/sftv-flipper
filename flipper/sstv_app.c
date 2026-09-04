@@ -390,7 +390,7 @@ static void draw_note_list(Canvas* canvas, SstvApp* app) {
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 2, 10, "Send note");
     canvas_set_font(canvas, FontSecondary);
-    const int rows = 4, rh = 11;
+    const int rows = 3, rh = 11; /* leave room for the bottom nav hints */
     int first = app->note_index - app->note_index % rows;
     for(int r = 0; r < rows; r++) {
         int idx = first + r;

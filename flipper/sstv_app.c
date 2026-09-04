@@ -493,8 +493,10 @@ static void draw_note_preview(Canvas* canvas, SstvApp* app) {
     canvas_draw_str(canvas, 126 - canvas_string_width(canvas, cnt), 10, cnt);
     canvas_draw_frame(canvas, 1, 13, 126, 38);
     note_font_begin(canvas);
-    int lh = (int)canvas_current_font_height(canvas) + 2;
-    note_draw_wrapped(canvas, app->note_text, 4, 13 + lh - 1, 120, lh, 3);
+    int pfh = (int)canvas_current_font_height(canvas);
+    int plh = pfh + 2, pml = (38 - 4) / plh;
+    if(pml < 1) pml = 1;
+    note_draw_wrapped(canvas, app->note_text, 4, 13 + pfh, 120, plh, pml);
     note_font_end(canvas);
     canvas_draw_icon(canvas, 2, 54, &I_Ok_btn_9x9);
     canvas_draw_str(canvas, 14, 62, "send");
@@ -531,8 +533,10 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         canvas_set_font(canvas, FontSecondary);
         canvas_draw_frame(canvas, 1, 2, PANEL_X - 5, 50);
         note_font_begin(canvas);
-        int nlh = (int)canvas_current_font_height(canvas) + 2;
-        note_draw_wrapped(canvas, app->note_text, 4, 2 + nlh, PANEL_X - 11, nlh, 4);
+        int tfh = (int)canvas_current_font_height(canvas);
+        int tlh = tfh + 2, tml = (50 - 4) / tlh;
+        if(tml < 1) tml = 1;
+        note_draw_wrapped(canvas, app->note_text, 4, 2 + tfh, PANEL_X - 11, tlh, tml);
         note_font_end(canvas);
         draw_panel(canvas, app);
         furi_mutex_release(app->mutex);

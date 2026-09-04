@@ -338,19 +338,35 @@ static void draw_menu(Canvas* canvas, SstvApp* app) {
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 2, 10, "Slow Flipper TV");
     canvas_set_font(canvas, FontSecondary);
-    struct { const char* label; } rows[2] = {{"Send image"}, {"Send note"}};
+    /* two tiles side by side, icon over a label; the selected one gets a thick frame */
+    const int tw = 58, th = 34, ty = 15;
+    const int tx[2] = {4, 66};
+    const char* labels[2] = {"Image", "Note"};
     for(int i = 0; i < 2; i++) {
-        int y = 20 + i * 20; /* row box top */
+        int x = tx[i];
+        canvas_draw_rframe(canvas, x, ty, tw, th, 4);
         if(i == app->menu_index) {
-            canvas_draw_rbox(canvas, 2, y, 124, 18, 3);
-            canvas_set_color(canvas, ColorWhite);
+            canvas_draw_rframe(canvas, x + 1, ty + 1, tw - 2, th - 2, 3);
+            canvas_draw_rframe(canvas, x + 2, ty + 2, tw - 4, th - 4, 3);
         }
-        if(i == 0 && app->scan_anim)
-            canvas_draw_icon_animation(canvas, 7, y + 3, app->scan_anim);
-        else
-            canvas_draw_str(canvas, 8, y + 13, "T"); /* note marker */
-        canvas_draw_str(canvas, 26, y + 13, rows[i].label);
-        canvas_set_color(canvas, ColorBlack);
+        int cx = x + tw / 2;
+        if(i == 0) {
+            /* animated scanning icon (13x12), centred in the upper part of the tile */
+            if(app->scan_anim) canvas_draw_icon_animation(canvas, cx - 6, ty + 5, app->scan_anim);
+        } else {
+            /* a small note/document glyph with a folded corner and text lines */
+            int gx = cx - 7, gy = ty + 4, gw = 14, gh = 15, fold = 4;
+            canvas_draw_line(canvas, gx, gy, gx + gw - fold, gy);
+            canvas_draw_line(canvas, gx, gy, gx, gy + gh);
+            canvas_draw_line(canvas, gx, gy + gh, gx + gw, gy + gh);
+            canvas_draw_line(canvas, gx + gw, gy + fold, gx + gw, gy + gh);
+            canvas_draw_line(canvas, gx + gw - fold, gy, gx + gw, gy + fold);
+            canvas_draw_line(canvas, gx + gw - fold, gy, gx + gw - fold, gy + fold);
+            canvas_draw_line(canvas, gx + gw - fold, gy + fold, gx + gw, gy + fold);
+            for(int l = 0; l < 3; l++) canvas_draw_line(canvas, gx + 2, gy + 5 + l * 3, gx + gw - 3, gy + 5 + l * 3);
+        }
+        int lw = canvas_string_width(canvas, labels[i]);
+        canvas_draw_str(canvas, cx - lw / 2, ty + th - 4, labels[i]);
     }
     canvas_draw_icon(canvas, 2, 54, &I_Ok_btn_9x9);
     canvas_draw_str(canvas, 14, 62, "open");
@@ -720,7 +736,8 @@ static void run_viewport(SstvApp* app) {
             }
             if(ev.input.type != InputTypeShort && ev.input.type != InputTypeRepeat) break;
             if(app->state == StateMenu) {
-                if(ev.input.key == InputKeyUp || ev.input.key == InputKeyDown) app->menu_index ^= 1;
+                if(ev.input.key == InputKeyLeft || ev.input.key == InputKeyRight ||
+                   ev.input.key == InputKeyUp || ev.input.key == InputKeyDown) app->menu_index ^= 1;
                 if(ev.input.key == InputKeyOk && ev.input.type == InputTypeShort) {
                     if(app->menu_index == 0) {
                         set_state(app, StateBrowse);

@@ -703,8 +703,49 @@ static void start_tx(SstvApp* app) {
     }
 }
 
+/* First line of the note -> ASCII slug (Cyrillic transliterated), so the same note always
+ * gets the same name and overwrites on the receiver. */
+static void note_translit(const char* in, char* out, size_t cap) {
+    static const char* const cyr[32] = {
+        "a", "b", "v", "g", "d", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p",
+        "r", "s", "t", "u", "f", "h", "ts", "ch", "sh", "sch", "", "y", "", "e", "yu", "ya"};
+    size_t n = 0;
+    const uint8_t* p = (const uint8_t*)in;
+    while(*p && *p != '\n' && n + 1 < cap) {
+        uint32_t cp;
+        if(*p < 0x80) {
+            cp = *p;
+            p += 1;
+        } else if((*p & 0xE0) == 0xC0) {
+            cp = (uint32_t)((*p & 0x1F) << 6) | (p[1] & 0x3F);
+            p += 2;
+        } else if((*p & 0xF0) == 0xE0) {
+            cp = (uint32_t)((*p & 0x0F) << 12) | (uint32_t)((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+            p += 3;
+        } else {
+            p += 1;
+            continue;
+        }
+        char one[2] = {0, 0};
+        const char* s = "";
+        if(cp < 0x80) {
+            one[0] = (char)cp;
+            s = one;
+        } else if(cp >= 0x430 && cp <= 0x44F) {
+            s = cyr[cp - 0x430];
+        } else if(cp >= 0x410 && cp <= 0x42F) {
+            s = cyr[cp - 0x410];
+        } else if(cp == 0x451 || cp == 0x401) {
+            s = "e";
+        }
+        for(; *s && n + 1 < cap; s++) out[n++] = *s;
+    }
+    out[n] = 0;
+}
+
 static void start_tx_note(SstvApp* app) {
-    app->note_name[0] = 0; /* no name on the wire: the receiver numbers notes note_N (Latin) */
+    note_translit(app->note_text, app->note_name, SSTV_NOTE_NAME_MAX + 1);
+    if(app->note_name[0] == 0) strcpy(app->note_name, "Note"); /* no name on the wire: the receiver numbers notes note_N (Latin) */
     if(sstv_tx_start_note(app->note_text, app->note_name, tx_callback, app)) {
         app->frames_total = (uint16_t)sstv_tx_total_frames();
         app->coded = false;

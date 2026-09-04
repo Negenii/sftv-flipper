@@ -71,6 +71,7 @@ typedef struct {
     int menu_index; /* top menu: 0 image, 1 note */
     int note_index; /* note list cursor: 0 = New note, 1.. = presets */
     bool is_note; /* the current transmission is a text note */
+    bool pausing; /* Back pressed: PAUSE block is being sent, not yet holding */
     char note_text[SSTV_NOTE_MAX_CHARS + 1];
     char note_name[SSTV_NAME_MAX + 1];
     ViewDispatcher* kbd_vd; /* temporary dispatcher used only for the note keyboard */
@@ -206,6 +207,15 @@ static void draw_sheet(Canvas* canvas, const uint8_t* preview, int y0) {
     vline_clipped(canvas, SHEET_X + SSTV_PREVIEW_W, y0 - 1, y0 + SSTV_PREVIEW_H);
 }
 
+/* Small rotating-line spinner centred at (cx, cy). */
+static void draw_spinner(Canvas* canvas, int cx, int cy) {
+    static const int8_t dx[8] = {0, 2, 3, 2, 0, -2, -3, -2};
+    static const int8_t dy[8] = {-3, -2, 0, 2, 3, 2, 0, -2};
+    int k = (int)((furi_get_tick() / 90) % 8);
+    canvas_draw_line(canvas, cx, cy, cx + dx[k], cy + dy[k]);
+    canvas_draw_dot(canvas, cx + dx[k], cy + dy[k]);
+}
+
 /* Button hint: icon plus a word, baseline at `y`. */
 static void hint(Canvas* canvas, const Icon* icon, int icon_h, const char* text, int y) {
     canvas_draw_icon(canvas, PANEL_X, y - icon_h + 1, icon);
@@ -231,9 +241,16 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
         break;
     case StateTransmit: {
         bool paused = sstv_tx_is_paused();
-        canvas_draw_str(canvas, PANEL_X, 9, paused ? "Paused" : app->is_note ? "TX note" : app->coded ? "TX zip" : "TX raw");
+        if(paused) app->pausing = false;
+        bool pausing = app->pausing;
+        canvas_draw_str(canvas, PANEL_X, 9, paused ? "Paused" : pausing ? "Pausing" : app->is_note ? "TX note" : app->coded ? "TX zip" : "TX raw");
         float p = app->frames_total ? (float)app->frames_sent / app->frames_total : 0.0f;
         elements_progress_bar(canvas, PANEL_X, 12, w, p);
+        if(pausing) {
+            draw_spinner(canvas, PANEL_X + 6, 34);
+            canvas_draw_str(canvas, PANEL_X + 16, 38, "wait");
+            break;
+        }
         if(app->frames_total > 200) {
             /* tenths matter only on long passes (big uncompressed image); on a short one
              * each frame is ~1 %, so the decimal is noise */
@@ -479,7 +496,7 @@ static void draw_note_list(Canvas* canvas, SstvApp* app) {
         note_font_end(canvas);
     }
     canvas_draw_icon(canvas, 2, 54, &I_Ok_btn_9x9);
-    canvas_draw_str(canvas, 14, 62, app->note_index == 0 ? "type" : "edit");
+    canvas_draw_str(canvas, 14, 62, app->note_index == 0 ? "type" : "send");
     canvas_draw_icon(canvas, 44, 53, &I_back_10px);
     canvas_draw_str(canvas, 56, 62, "back");
 }
@@ -500,8 +517,9 @@ static void draw_note_preview(Canvas* canvas, SstvApp* app) {
     note_font_end(canvas);
     canvas_draw_icon(canvas, 2, 54, &I_Ok_btn_9x9);
     canvas_draw_str(canvas, 14, 62, "send");
-    canvas_draw_icon(canvas, 44, 53, &I_back_10px);
-    canvas_draw_str(canvas, 56, 62, "back");
+    canvas_draw_str(canvas, 44, 62, "^ edit");
+    canvas_draw_icon(canvas, 78, 53, &I_back_10px);
+    canvas_draw_str(canvas, 90, 62, "back");
 }
 
 static void draw_callback(Canvas* canvas, void* ctx) {
@@ -821,10 +839,11 @@ static void run_viewport(SstvApp* app) {
                         app->note_text[0] = 0;
                         set_state(app, edit_note(app) ? StateNotePreview : StateNoteList);
                     } else {
-                        /* load the preset into the editor so it can be tweaked before sending */
+                        /* presets (often Cyrillic) go straight to the preview; the ASCII
+                         * keyboard cannot edit UTF-8, so editing is offered only from there */
                         strncpy(app->note_text, SSTV_NOTE_PRESETS[app->note_index - 1], SSTV_NOTE_MAX_CHARS);
                         app->note_text[SSTV_NOTE_MAX_CHARS] = 0;
-                        set_state(app, edit_note(app) ? StateNotePreview : StateNoteList);
+                        set_state(app, StateNotePreview);
                     }
                 }
                 view_port_update(app->vp);
@@ -832,6 +851,8 @@ static void run_viewport(SstvApp* app) {
             }
             if(app->state == StateNotePreview) {
                 if(ev.input.key == InputKeyBack && ev.input.type == InputTypeShort) set_state(app, StateNoteList);
+                if(ev.input.key == InputKeyUp && ev.input.type == InputTypeShort)
+                    set_state(app, edit_note(app) ? StateNotePreview : StateNotePreview);
                 if(ev.input.key == InputKeyOk && ev.input.type == InputTypeShort) start_tx_note(app);
                 view_port_update(app->vp);
                 break;
@@ -848,6 +869,7 @@ static void run_viewport(SstvApp* app) {
                         set_state(app, app->is_note ? StateNotePreview : StatePreview);
                     } else {
                         sstv_tx_pause();
+                        app->pausing = true;
                         view_port_update(app->vp);
                     }
                 } else if(app->state == StateDone) {
@@ -859,6 +881,7 @@ static void run_viewport(SstvApp* app) {
             } else if(ev.input.key == InputKeyOk) {
                 if(app->state == StateTransmit && sstv_tx_is_paused()) {
                     sstv_tx_resume();
+                    app->pausing = false;
                     view_port_update(app->vp);
                 } else if(app->state == StateDone) {
                     if(app->is_note) start_tx_note(app);

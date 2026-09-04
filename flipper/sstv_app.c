@@ -286,7 +286,6 @@ static void draw_browse(Canvas* canvas, SstvApp* app) {
     canvas_draw_str(canvas, 14, 62, "open");
     canvas_draw_icon(canvas, 44, 53, &I_back_10px);
     canvas_draw_str(canvas, 56, 62, "exit");
-    canvas_draw_str(canvas, 76, 62, "hold^ test");
     snprintf(buf, sizeof buf, "%d/%d", app->file_index + 1, app->file_count);
     canvas_draw_str(canvas, 126 - canvas_string_width(canvas, buf), 62, buf);
 }

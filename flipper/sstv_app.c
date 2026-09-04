@@ -10,6 +10,7 @@
 #include "pbm.h"
 #include "sstv_preview.h"
 #include "sstv_tx.h"
+#include <gui/icon_animation.h>
 #include "sftv_tx_icons.h"
 
 #define TAG "SftvTx"
@@ -59,6 +60,7 @@ typedef struct {
     uint8_t thumbs[MAX_FILES][SSTV_TINY_BYTES]; /* 40x20 tiles */
     int file_count;
     int file_index;
+    IconAnimation* scan_anim; /* animated logo (image scanning in) in the browser header */
     FuriThread* led_thread; /* follows the symbol on the speaker while transmitting */
     volatile bool led_run;
 } SstvApp;
@@ -249,17 +251,18 @@ static void fit_name(Canvas* canvas, char* out, size_t cap, const char* name, in
 }
 
 /* Tile grid: three 40x20 thumbnails per page, name under each, cursor as a double frame. */
+static void scan_anim_cb(IconAnimation* instance, void* ctx) {
+    UNUSED(instance);
+    SstvApp* app = ctx;
+    view_port_update(app->vp);
+}
+
 static void draw_browse(Canvas* canvas, SstvApp* app) {
     char buf[32];
-    /* "TX" pill, then the title */
-    canvas_set_font(canvas, FontSecondary);
-    int pw = canvas_string_width(canvas, "TX") + 6;
-    canvas_draw_rbox(canvas, 2, 1, pw, 11, 3);
-    canvas_set_color(canvas, ColorWhite);
-    canvas_draw_str(canvas, 5, 10, "TX");
-    canvas_set_color(canvas, ColorBlack);
+    /* animated logo (an image scanning in) then the title */
+    if(app->scan_anim) canvas_draw_icon_animation(canvas, 2, 1, app->scan_anim);
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2 + pw + 4, 10, "Slow Flipper TV");
+    canvas_draw_str(canvas, 2 + 13 + 4, 10, "Slow Flipper TV");
     if(app->file_count == 0) {
         canvas_draw_str(canvas, 2, 30, "No pictures. Put 400x240");
         canvas_draw_str(canvas, 2, 40, "P4 .pbm files into");
@@ -522,6 +525,9 @@ int32_t sftv_app_main(void* p) {
     app->vp = view_port_alloc();
     view_port_draw_callback_set(app->vp, draw_callback, app);
     view_port_input_callback_set(app->vp, input_callback, app);
+    app->scan_anim = icon_animation_alloc(&A_scan);
+    icon_animation_set_update_callback(app->scan_anim, scan_anim_cb, app);
+    icon_animation_start(app->scan_anim);
 
     app->storage = furi_record_open(RECORD_STORAGE);
     /* the app used to be called SSTV: carry the pictures over */
@@ -535,6 +541,8 @@ int32_t sftv_app_main(void* p) {
     run_viewport(app);
 
     furi_record_close(RECORD_STORAGE);
+    icon_animation_stop(app->scan_anim);
+    icon_animation_free(app->scan_anim);
     view_port_free(app->vp);
     furi_record_close(RECORD_GUI);
     led_stop(app);

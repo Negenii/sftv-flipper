@@ -298,6 +298,19 @@ bool sstv_tx_start(const uint8_t* image_bits, const char* name, bool loop, SstvT
     return tx_run(true, cb, ctx);
 }
 
+bool sstv_tx_start_note(const char* text, const char* name, SstvTxCallback cb, void* ctx) {
+    if(tx.running) return false;
+    if(!furi_hal_speaker_acquire(1000)) return false;
+    tx.frames = malloc(SSTV_MAX_FRAMES * SSTV_FRAME_BYTES);
+    tx.lines_after = malloc(SSTV_MAX_FRAMES);
+    tx.total = (uint16_t)sstv_build_note(text, name, tx.frames, tx.lines_after);
+    tx.data_frames = 0; /* note LED just follows the tones; no parity distinction needed */
+    tx.coded = false;
+    tx.loop = false;
+    tx.test = false;
+    return tx_run(true, cb, ctx);
+}
+
 bool sstv_tx_start_test(SstvTxCallback cb, void* ctx) {
     if(tx.running) return false;
     if(!furi_hal_speaker_acquire(1000)) return false;

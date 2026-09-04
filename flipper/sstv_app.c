@@ -677,6 +677,15 @@ static void start_tx_note(SstvApp* app) {
  * standard text_input view is hosted only for the duration of the edit). Returns true if the
  * user confirmed. note_text is edited in place (prefilled for a preset). */
 static bool g_note_kbd_ok;
+static TextInput* g_note_ti;
+static char g_note_hdr[40];
+/* Live character counter in the keyboard header (the module writes each keystroke straight
+ * into our buffer, so strlen is current). */
+static void note_kbd_tick(void* ctx) {
+    SstvApp* app = ctx;
+    snprintf(g_note_hdr, sizeof g_note_hdr, "Type a note  %u/%d", (unsigned)strlen(app->note_text), SSTV_NOTE_MAX_CHARS);
+    if(g_note_ti) text_input_set_header_text(g_note_ti, g_note_hdr);
+}
 static void note_kbd_result(void* ctx) {
     SstvApp* app = ctx;
     g_note_kbd_ok = true;
@@ -694,16 +703,19 @@ static bool edit_note(SstvApp* app) {
     ViewDispatcher* vd = view_dispatcher_alloc();
     app->kbd_vd = vd;
     TextInput* ti = text_input_alloc();
-    text_input_set_header_text(ti, "Type a note");
+    g_note_ti = ti;
     text_input_set_result_callback(
         ti, note_kbd_result, app, app->note_text, SSTV_NOTE_MAX_CHARS + 1, false);
     view_dispatcher_set_event_callback_context(vd, app);
     view_dispatcher_set_navigation_event_callback(vd, note_kbd_back);
+    view_dispatcher_set_tick_event_callback(vd, note_kbd_tick, 150);
+    note_kbd_tick(app); /* header shows the counter from the start */
     view_dispatcher_add_view(vd, 0, text_input_get_view(ti));
     view_dispatcher_attach_to_gui(vd, app->gui, ViewDispatcherTypeFullscreen);
     view_dispatcher_switch_to_view(vd, 0);
     view_dispatcher_run(vd);
     view_dispatcher_remove_view(vd, 0);
+    g_note_ti = NULL;
     text_input_free(ti);
     view_dispatcher_free(vd);
     app->kbd_vd = NULL;

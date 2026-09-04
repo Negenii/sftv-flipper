@@ -20,7 +20,7 @@
 #define SSTV_DATA_DIR EXT_PATH("apps_data/sftv_tx")
 #define SSTV_OLD_DATA_DIR EXT_PATH("apps_data/sstv_tx") /* before the rename to SFTV */
 #define SSTV_FILE_MAX (SSTV_IMAGE_BYTES + 256)
-#define MAX_FILES 24
+#define MAX_FILES 64
 #define TILES_PER_PAGE 3
 
 typedef enum {

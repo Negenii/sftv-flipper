@@ -247,6 +247,7 @@ static void fit_name(Canvas* canvas, char* out, size_t cap, const char* name, in
     out[cap - 1] = 0;
     char* dot = strrchr(out, '.');
     if(dot && dot != out) *dot = 0;
+    if(out[0] >= 'a' && out[0] <= 'z') out[0] -= 32; /* show every name capitalised */
     if((int)canvas_string_width(canvas, out) <= max_w) return;
     size_t n = strlen(out);
     while(n > 1) {
@@ -419,6 +420,7 @@ static bool open_file(SstvApp* app) {
     app->name[sizeof(app->name) - 1] = 0;
     char* dot = strrchr(app->name, '.');
     if(dot && dot != app->name) *dot = 0;
+    if(app->name[0] >= 'a' && app->name[0] <= 'z') app->name[0] -= 32; /* capitalised on the receiver too */
     return true;
 }
 

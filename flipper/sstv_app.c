@@ -685,17 +685,8 @@ static void start_tx(SstvApp* app) {
     }
 }
 
-/* Derives the meta name (gallery label) from the first line of the note, capitalised. */
-static void note_make_name(SstvApp* app) {
-    int n = 0;
-    for(const char* t = app->note_text; *t && *t != '\n' && n < SSTV_NOTE_NAME_MAX; t++) app->note_name[n++] = *t;
-    app->note_name[n] = 0;
-    if(n == 0) strcpy(app->note_name, "Note");
-    if(app->note_name[0] >= 'a' && app->note_name[0] <= 'z') app->note_name[0] -= 32;
-}
-
 static void start_tx_note(SstvApp* app) {
-    note_make_name(app);
+    app->note_name[0] = 0; /* no name on the wire: the receiver numbers notes note_N (Latin) */
     if(sstv_tx_start_note(app->note_text, app->note_name, tx_callback, app)) {
         app->frames_total = (uint16_t)sstv_tx_total_frames();
         app->coded = false;

@@ -152,17 +152,14 @@ static void draw_under_layer(Canvas* canvas) {
     canvas_draw_line(canvas, tx + 1, by + bh - 1, tx + 2, by + bh + 3);
 }
 
-/* Top row of the picture. While the intro frames go out (START, previews, schedule) the sheet
- * moves from its resting place up to the top edge; then each transmitted line pushes it out. */
-static int intro_frames(const SstvApp* app) {
-    return SSTV_ILEAVE + (app->coded ? SSTV_INTRO_FRAMES_CODED : SSTV_INTRO_FRAMES);
-}
-
+/* Top row of the picture. The sheet slides out across the whole transmission, so progress
+ * counts every frame (START, tiny, preview, schedule, picture data and outer-code parity), not
+ * only the 240 image lines. Resting at SHEET_Y, fully out at -SSTV_PREVIEW_H. */
 static int sheet_top(const SstvApp* app) {
-    if(app->state == StatePreview) return SHEET_Y;
-    int intro = intro_frames(app);
-    if(app->frames_sent < intro) return SHEET_Y - SHEET_Y * app->frames_sent / intro;
-    return -(app->lines_done * SSTV_PREVIEW_H / SSTV_HEIGHT);
+    if(app->state == StatePreview || app->frames_total == 0) return SHEET_Y;
+    int travel = SHEET_Y + SSTV_PREVIEW_H;
+    int prog = (int)((uint32_t)app->frames_sent * (uint32_t)travel / app->frames_total);
+    return SHEET_Y - prog;
 }
 
 static void draw_sheet(Canvas* canvas, const uint8_t* preview, int y0) {
@@ -315,7 +312,7 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         return;
     }
     /* the layer underneath appears once the sheet is flush with the top edge */
-    if(app->state == StateDone || (app->state == StateTransmit && app->frames_sent >= intro_frames(app))) draw_under_layer(canvas);
+    if(app->state == StateDone || (app->state == StateTransmit && sheet_top(app) <= 0)) draw_under_layer(canvas);
     if(app->state != StateDone) draw_sheet(canvas, app->preview, sheet_top(app));
     draw_panel(canvas, app);
     furi_mutex_release(app->mutex);

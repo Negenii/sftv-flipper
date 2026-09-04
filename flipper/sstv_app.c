@@ -821,10 +821,10 @@ static void run_viewport(SstvApp* app) {
                         app->note_text[0] = 0;
                         set_state(app, edit_note(app) ? StateNotePreview : StateNoteList);
                     } else {
-                        /* a preset (may be UTF-8) goes straight to the preview, sent as-is */
+                        /* load the preset into the editor so it can be tweaked before sending */
                         strncpy(app->note_text, SSTV_NOTE_PRESETS[app->note_index - 1], SSTV_NOTE_MAX_CHARS);
                         app->note_text[SSTV_NOTE_MAX_CHARS] = 0;
-                        set_state(app, StateNotePreview);
+                        set_state(app, edit_note(app) ? StateNotePreview : StateNoteList);
                     }
                 }
                 view_port_update(app->vp);

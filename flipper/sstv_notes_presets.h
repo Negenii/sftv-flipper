@@ -9,7 +9,7 @@ static const char* const SSTV_NOTE_PRESETS[] = {
     "( o_o )  hi from a dolphin",
     "Battery low. Send help and snacks.",
     "SFTV works: Slow Flipper TV, over the air, one buzzer at a time.",
-    "Привет! Это заметка на русском — проверка UTF-8.",
-    "Флиппер передаёт текст звуком, Playdate его рисует.",
+    "Привет! Это заметка на русском - проверка UTF-8.",
+    "Флиппер передает текст звуком, Playdate его рисует.",
 };
 #define SSTV_NOTE_PRESET_COUNT ((int)(sizeof(SSTV_NOTE_PRESETS) / sizeof(SSTV_NOTE_PRESETS[0])))

@@ -70,7 +70,9 @@ typedef struct {
     uint8_t thumbs[MAX_FILES][SSTV_TINY_BYTES]; /* 40x20 tiles */
     int file_count;
     int file_index;
-    IconAnimation* scan_anim; /* animated logo (image scanning in) in the Send-image tile */
+    IconAnimation* scan_anim; /* animated icon in the Send-image tile */
+    IconAnimation* note_anim; /* animated icon in the Send-note tile */
+    int menu_anim; /* which tile is currently animating (-1 none) */
     int menu_index; /* top menu: 0 image, 1 note */
     int note_index; /* note list cursor: 0 = New note, 1.. = presets */
     bool is_note; /* the current transmission is a text note */
@@ -427,6 +429,13 @@ static void draw_menu(Canvas* canvas, SstvApp* app) {
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 2, 10, "Slow Flipper TV");
     canvas_set_font(canvas, FontSecondary);
+    /* animate only the currently selected tile */
+    if(app->menu_anim != app->menu_index) {
+        icon_animation_stop(app->scan_anim);
+        if(app->note_anim) icon_animation_stop(app->note_anim);
+        icon_animation_start(app->menu_index == 0 ? app->scan_anim : app->note_anim);
+        app->menu_anim = app->menu_index;
+    }
     /* two tiles side by side, icon over a label; the selected one gets a thick frame */
     const int tw = 58, th = 34, ty = 15;
     const int tx[2] = {4, 66};
@@ -439,21 +448,8 @@ static void draw_menu(Canvas* canvas, SstvApp* app) {
             canvas_draw_rframe(canvas, x + 2, ty + 2, tw - 4, th - 4, 3);
         }
         int cx = x + tw / 2;
-        if(i == 0) {
-            /* animated scanning icon (13x12), centred in the upper part of the tile */
-            if(app->scan_anim) canvas_draw_icon_animation(canvas, cx - 6, ty + 5, app->scan_anim);
-        } else {
-            /* a small note/document glyph with a folded corner and text lines */
-            int gx = cx - 7, gy = ty + 4, gw = 14, gh = 15, fold = 4;
-            canvas_draw_line(canvas, gx, gy, gx + gw - fold, gy);
-            canvas_draw_line(canvas, gx, gy, gx, gy + gh);
-            canvas_draw_line(canvas, gx, gy + gh, gx + gw, gy + gh);
-            canvas_draw_line(canvas, gx + gw, gy + fold, gx + gw, gy + gh);
-            canvas_draw_line(canvas, gx + gw - fold, gy, gx + gw, gy + fold);
-            canvas_draw_line(canvas, gx + gw - fold, gy, gx + gw - fold, gy + fold);
-            canvas_draw_line(canvas, gx + gw - fold, gy + fold, gx + gw, gy + fold);
-            for(int l = 0; l < 3; l++) canvas_draw_line(canvas, gx + 2, gy + 5 + l * 3, gx + gw - 3, gy + 5 + l * 3);
-        }
+        IconAnimation* anim = i == 0 ? app->scan_anim : app->note_anim;
+        if(anim) canvas_draw_icon_animation(canvas, cx - 6, ty + 5, anim);
         int lw = canvas_string_width(canvas, labels[i]);
         canvas_draw_str(canvas, cx - lw / 2, ty + th - 4, labels[i]);
     }
@@ -558,7 +554,7 @@ static void draw_note_list(Canvas* canvas, SstvApp* app) {
         note_font_end(canvas);
     }
     canvas_draw_icon(canvas, 2, 54, &I_Ok_btn_9x9);
-    canvas_draw_str(canvas, 14, 62, app->note_index == 0 ? "type" : "open");
+    canvas_draw_str(canvas, 14, 62, app->note_index == 0 ? "type" : "pick");
     canvas_draw_icon(canvas, 44, 53, &I_back_10px);
     canvas_draw_str(canvas, 56, 62, "back");
 }
@@ -758,6 +754,11 @@ static void set_state(SstvApp* app, AppState s) {
         led_start(app);
     } else {
         led_stop(app);
+    }
+    if(s != StateMenu) {
+        icon_animation_stop(app->scan_anim);
+        if(app->note_anim) icon_animation_stop(app->note_anim);
+        app->menu_anim = -1;
     }
     view_port_update(app->vp);
 }
@@ -1062,7 +1063,9 @@ int32_t sftv_app_main(void* p) {
     view_port_input_callback_set(app->vp, input_callback, app);
     app->scan_anim = icon_animation_alloc(&A_scan);
     icon_animation_set_update_callback(app->scan_anim, scan_anim_cb, app);
-    icon_animation_start(app->scan_anim);
+    app->note_anim = icon_animation_alloc(&A_note_write);
+    icon_animation_set_update_callback(app->note_anim, scan_anim_cb, app);
+    app->menu_anim = -1;
 
     app->storage = furi_record_open(RECORD_STORAGE);
     /* the app used to be called SSTV: carry the pictures over */
@@ -1079,6 +1082,8 @@ int32_t sftv_app_main(void* p) {
     furi_record_close(RECORD_STORAGE);
     icon_animation_stop(app->scan_anim);
     icon_animation_free(app->scan_anim);
+    icon_animation_stop(app->note_anim);
+    icon_animation_free(app->note_anim);
     view_port_free(app->vp);
     furi_record_close(RECORD_GUI);
     led_stop(app);

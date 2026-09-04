@@ -11,6 +11,9 @@ typedef void (*SstvTxCallback)(void* ctx, uint16_t frame, bool done);
  * into physical frames. Acquires the speaker. Returns false if the speaker is busy. */
 bool sstv_tx_start(const uint8_t* image_bits, const char* name, bool loop, SstvTxCallback cb, void* ctx);
 
+/* Transmit an ASCII text note (see sstv_build_note). Same framing/modem as an image. */
+bool sstv_tx_start_note(const char* text, const char* name, SstvTxCallback cb, void* ctx);
+
 /* Temporary tone test (channel measurements): sync burst + 164 symbols cycling through six
  * values (silence, 2500, 3000, 3500, 4000, 4500 Hz) in a fixed pseudo-random order
  * (SSTV_TEST_* below), repeated until sstv_tx_stop(). The callback fires per frame with

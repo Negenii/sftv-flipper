@@ -11,7 +11,10 @@
 #include "sstv_preview.h"
 #include "sstv_tx.h"
 #include <gui/icon_animation.h>
+#include <gui/view_dispatcher.h>
+#include <gui/modules/text_input.h>
 #include "sftv_tx_icons.h"
+#include "sstv_notes_presets.h"
 
 #define TAG "SftvTx"
 #define SSTV_DATA_DIR EXT_PATH("apps_data/sftv_tx")
@@ -21,7 +24,10 @@
 #define TILES_PER_PAGE 3
 
 typedef enum {
+    StateMenu, /* top menu: Send image / Send note */
     StateBrowse, /* tile grid of the pictures on the card */
+    StateNoteList, /* pick a preset note or start a new one */
+    StateNotePreview, /* the note text, ready to send */
     StatePreview,
     StateTransmit,
     StateDone,
@@ -60,7 +66,13 @@ typedef struct {
     uint8_t thumbs[MAX_FILES][SSTV_TINY_BYTES]; /* 40x20 tiles */
     int file_count;
     int file_index;
-    IconAnimation* scan_anim; /* animated logo (image scanning in) in the browser header */
+    IconAnimation* scan_anim; /* animated logo (image scanning in) in the Send-image tile */
+    int menu_index; /* top menu: 0 image, 1 note */
+    int note_index; /* note list cursor: 0 = New note, 1.. = presets */
+    bool is_note; /* the current transmission is a text note */
+    char note_text[SSTV_NOTE_MAX_CHARS + 1];
+    char note_name[SSTV_NAME_MAX + 1];
+    ViewDispatcher* kbd_vd; /* temporary dispatcher used only for the note keyboard */
     FuriThread* led_thread; /* follows the symbol on the speaker while transmitting */
     volatile bool led_run;
 } SstvApp;
@@ -205,7 +217,10 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
     canvas_draw_line(canvas, PANEL_X - 3, 0, PANEL_X - 3, 63);
     canvas_set_font(canvas, FontSecondary);
     switch(app->state) {
+    case StateMenu:
     case StateBrowse:
+    case StateNoteList:
+    case StateNotePreview:
     case StateTest:
         break;
     case StatePreview:
@@ -215,7 +230,7 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
         break;
     case StateTransmit: {
         bool paused = sstv_tx_is_paused();
-        canvas_draw_str(canvas, PANEL_X, 9, paused ? "Paused" : app->coded ? "TX zip" : "TX raw");
+        canvas_draw_str(canvas, PANEL_X, 9, paused ? "Paused" : app->is_note ? "TX note" : app->coded ? "TX zip" : "TX raw");
         float p = app->frames_total ? (float)app->frames_sent / app->frames_total : 0.0f;
         elements_progress_bar(canvas, PANEL_X, 12, w, p);
         if(app->frames_total > 200) {
@@ -279,10 +294,15 @@ static void scan_anim_cb(IconAnimation* instance, void* ctx) {
 
 static void draw_browse(Canvas* canvas, SstvApp* app) {
     char buf[32];
-    /* animated logo (an image scanning in) then the title */
-    if(app->scan_anim) canvas_draw_icon_animation(canvas, 2, 1, app->scan_anim);
+    /* "TX" pill, then the title */
+    canvas_set_font(canvas, FontSecondary);
+    int pw = canvas_string_width(canvas, "TX") + 6;
+    canvas_draw_rbox(canvas, 2, 1, pw, 11, 3);
+    canvas_set_color(canvas, ColorWhite);
+    canvas_draw_str(canvas, 5, 10, "TX");
+    canvas_set_color(canvas, ColorBlack);
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2 + 13 + 4, 10, "Slow Flipper TV");
+    canvas_draw_str(canvas, 2 + pw + 4, 10, "Slow Flipper TV");
     if(app->file_count == 0) {
         canvas_draw_str(canvas, 2, 30, "No pictures. Put 400x240");
         canvas_draw_str(canvas, 2, 40, "P4 .pbm files into");
@@ -313,12 +333,152 @@ static void draw_browse(Canvas* canvas, SstvApp* app) {
     canvas_draw_str(canvas, 126 - canvas_string_width(canvas, buf), 62, buf);
 }
 
+/* ---- top menu ---- */
+static void draw_menu(Canvas* canvas, SstvApp* app) {
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str(canvas, 2, 10, "Slow Flipper TV");
+    canvas_set_font(canvas, FontSecondary);
+    struct { const char* label; } rows[2] = {{"Send image"}, {"Send note"}};
+    for(int i = 0; i < 2; i++) {
+        int y = 20 + i * 20; /* row box top */
+        if(i == app->menu_index) {
+            canvas_draw_rbox(canvas, 2, y, 124, 18, 3);
+            canvas_set_color(canvas, ColorWhite);
+        }
+        if(i == 0 && app->scan_anim)
+            canvas_draw_icon_animation(canvas, 7, y + 3, app->scan_anim);
+        else
+            canvas_draw_str(canvas, 8, y + 13, "T"); /* note marker */
+        canvas_draw_str(canvas, 26, y + 13, rows[i].label);
+        canvas_set_color(canvas, ColorBlack);
+    }
+    canvas_draw_icon(canvas, 2, 54, &I_Ok_btn_9x9);
+    canvas_draw_str(canvas, 14, 62, "open");
+    canvas_draw_icon(canvas, 44, 53, &I_back_10px);
+    canvas_draw_str(canvas, 56, 62, "exit");
+}
+
+/* ---- note list (New note + presets) ---- */
+#define NOTE_LIST_LEN (1 + SSTV_NOTE_PRESET_COUNT)
+static void note_list_label(int idx, char* out, size_t cap) {
+    if(idx == 0) {
+        strncpy(out, "New note...", cap - 1);
+        out[cap - 1] = 0;
+    } else {
+        strncpy(out, SSTV_NOTE_PRESETS[idx - 1], cap - 1);
+        out[cap - 1] = 0;
+    }
+}
+
+static void draw_note_list(Canvas* canvas, SstvApp* app) {
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str(canvas, 2, 10, "Send note");
+    canvas_set_font(canvas, FontSecondary);
+    const int rows = 4, rh = 11;
+    int first = app->note_index - app->note_index % rows;
+    for(int r = 0; r < rows; r++) {
+        int idx = first + r;
+        if(idx >= NOTE_LIST_LEN) break;
+        int y = 16 + r * rh; /* box top */
+        char label[40];
+        note_list_label(idx, label, sizeof label);
+        /* fit to width */
+        while(canvas_string_width(canvas, label) > 108 && strlen(label) > 1) label[strlen(label) - 1] = 0;
+        if(idx == app->note_index) {
+            canvas_draw_rbox(canvas, 2, y, 124, rh, 2);
+            canvas_set_color(canvas, ColorWhite);
+        }
+        canvas_draw_str(canvas, 6, y + 9, label);
+        canvas_set_color(canvas, ColorBlack);
+    }
+    canvas_draw_icon(canvas, 2, 54, &I_Ok_btn_9x9);
+    canvas_draw_str(canvas, 14, 62, app->note_index == 0 ? "type" : "edit");
+    canvas_draw_icon(canvas, 44, 53, &I_back_10px);
+    canvas_draw_str(canvas, 56, 62, "back");
+}
+
+/* Word-wrapped note text in a box; used for the preview. */
+static void draw_wrapped(Canvas* canvas, const char* text, int x0, int y0, int w, int line_h, int max_lines) {
+    char line[64];
+    int ll = 0, lines = 0, y = y0;
+    const char* p = text;
+    while(*p && lines < max_lines) {
+        /* take the next word */
+        const char* ws = p;
+        while(*ws == ' ') ws++;
+        const char* we = ws;
+        while(*we && *we != ' ') we++;
+        int wlen = (int)(we - ws);
+        char cand[64];
+        int cl = ll;
+        if(cl > 0) cand[cl++] = ' ';
+        for(int i = 0; i < wlen && cl < (int)sizeof cand - 1; i++) cand[cl++] = ws[i];
+        cand[cl] = 0;
+        if(canvas_string_width(canvas, cand) <= w || ll == 0) {
+            memcpy(line, cand, cl + 1);
+            ll = cl;
+        } else {
+            line[ll] = 0;
+            canvas_draw_str(canvas, x0, y, line);
+            y += line_h;
+            lines++;
+            ll = 0;
+            if(wlen < (int)sizeof line) {
+                memcpy(line, ws, wlen);
+                ll = wlen;
+                line[ll] = 0;
+            }
+        }
+        p = we;
+    }
+    if(ll > 0 && lines < max_lines) {
+        line[ll] = 0;
+        canvas_draw_str(canvas, x0, y, line);
+    }
+}
+
+static void draw_note_preview(Canvas* canvas, SstvApp* app) {
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str(canvas, 2, 10, "Note");
+    canvas_set_font(canvas, FontSecondary);
+    canvas_draw_frame(canvas, 1, 13, 126, 38);
+    draw_wrapped(canvas, app->note_text, 4, 22, 120, 9, 4);
+    canvas_draw_icon(canvas, 2, 54, &I_Ok_btn_9x9);
+    canvas_draw_str(canvas, 14, 62, "send");
+    canvas_draw_icon(canvas, 44, 53, &I_back_10px);
+    canvas_draw_str(canvas, 56, 62, "back");
+}
+
 static void draw_callback(Canvas* canvas, void* ctx) {
     SstvApp* app = ctx;
     furi_mutex_acquire(app->mutex, FuriWaitForever);
     canvas_clear(canvas);
+    if(app->state == StateMenu) {
+        draw_menu(canvas, app);
+        furi_mutex_release(app->mutex);
+        return;
+    }
     if(app->state == StateBrowse) {
         draw_browse(canvas, app);
+        furi_mutex_release(app->mutex);
+        return;
+    }
+    if(app->state == StateNoteList) {
+        draw_note_list(canvas, app);
+        furi_mutex_release(app->mutex);
+        return;
+    }
+    if(app->state == StateNotePreview) {
+        draw_note_preview(canvas, app);
+        furi_mutex_release(app->mutex);
+        return;
+    }
+    if((app->state == StateTransmit || app->state == StateDone) && app->is_note) {
+        /* a note has no picture sheet: show the text in a paper box, panel on the right */
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_frame(canvas, 1, 2, PANEL_X - 5, 50);
+        draw_wrapped(canvas, app->note_text, 4, 11, PANEL_X - 11, 9, 5);
+        draw_panel(canvas, app);
         furi_mutex_release(app->mutex);
         return;
     }
@@ -457,11 +617,72 @@ static void start_tx(SstvApp* app) {
     if(sstv_tx_start(app->image, app->name, false, tx_callback, app)) {
         app->frames_total = (uint16_t)sstv_tx_total_frames();
         app->coded = sstv_tx_is_coded();
+        app->is_note = false;
         app->lines_done = 0;
         set_state(app, StateTransmit);
     } else {
         FURI_LOG_E(TAG, "speaker busy");
     }
+}
+
+/* Derives the meta name (gallery label) from the first line of the note, capitalised. */
+static void note_make_name(SstvApp* app) {
+    int n = 0;
+    for(const char* t = app->note_text; *t && *t != '\n' && n < SSTV_NAME_MAX; t++) app->note_name[n++] = *t;
+    app->note_name[n] = 0;
+    if(n == 0) strcpy(app->note_name, "Note");
+    if(app->note_name[0] >= 'a' && app->note_name[0] <= 'z') app->note_name[0] -= 32;
+}
+
+static void start_tx_note(SstvApp* app) {
+    note_make_name(app);
+    if(sstv_tx_start_note(app->note_text, app->note_name, tx_callback, app)) {
+        app->frames_total = (uint16_t)sstv_tx_total_frames();
+        app->coded = false;
+        app->is_note = true;
+        app->lines_done = 0;
+        set_state(app, StateTransmit);
+    } else {
+        FURI_LOG_E(TAG, "speaker busy");
+    }
+}
+
+/* Note keyboard on a temporary ViewDispatcher (the app itself runs a raw ViewPort, so the
+ * standard text_input view is hosted only for the duration of the edit). Returns true if the
+ * user confirmed. note_text is edited in place (prefilled for a preset). */
+static bool g_note_kbd_ok;
+static void note_kbd_result(void* ctx) {
+    SstvApp* app = ctx;
+    g_note_kbd_ok = true;
+    view_dispatcher_stop(app->kbd_vd);
+}
+static bool note_kbd_back(void* ctx) {
+    SstvApp* app = ctx;
+    g_note_kbd_ok = false;
+    view_dispatcher_stop(app->kbd_vd);
+    return true;
+}
+static bool edit_note(SstvApp* app) {
+    g_note_kbd_ok = false;
+    gui_remove_view_port(app->gui, app->vp);
+    ViewDispatcher* vd = view_dispatcher_alloc();
+    app->kbd_vd = vd;
+    TextInput* ti = text_input_alloc();
+    text_input_set_header_text(ti, "Note (ASCII, max 200)");
+    text_input_set_result_callback(
+        ti, note_kbd_result, app, app->note_text, SSTV_NOTE_MAX_CHARS + 1, false);
+    view_dispatcher_set_event_callback_context(vd, app);
+    view_dispatcher_set_navigation_event_callback(vd, note_kbd_back);
+    view_dispatcher_add_view(vd, 0, text_input_get_view(ti));
+    view_dispatcher_attach_to_gui(vd, app->gui, ViewDispatcherTypeFullscreen);
+    view_dispatcher_switch_to_view(vd, 0);
+    view_dispatcher_run(vd);
+    view_dispatcher_remove_view(vd, 0);
+    text_input_free(ti);
+    view_dispatcher_free(vd);
+    app->kbd_vd = NULL;
+    gui_add_view_port(app->gui, app->vp, GuiLayerFullscreen);
+    return g_note_kbd_ok;
 }
 
 static void start_test(SstvApp* app) {
@@ -473,7 +694,7 @@ static void start_test(SstvApp* app) {
 }
 
 static void run_viewport(SstvApp* app) {
-    set_state(app, StateBrowse);
+    set_state(app, StateMenu);
     gui_add_view_port(app->gui, app->vp, GuiLayerFullscreen);
 
     bool leave = false;
@@ -498,6 +719,20 @@ static void run_viewport(SstvApp* app) {
                 break;
             }
             if(ev.input.type != InputTypeShort && ev.input.type != InputTypeRepeat) break;
+            if(app->state == StateMenu) {
+                if(ev.input.key == InputKeyUp || ev.input.key == InputKeyDown) app->menu_index ^= 1;
+                if(ev.input.key == InputKeyOk && ev.input.type == InputTypeShort) {
+                    if(app->menu_index == 0) {
+                        set_state(app, StateBrowse);
+                    } else {
+                        app->note_index = 0;
+                        set_state(app, StateNoteList);
+                    }
+                }
+                if(ev.input.key == InputKeyBack && ev.input.type == InputTypeShort) leave = true;
+                view_port_update(app->vp);
+                break;
+            }
             if(app->state == StateBrowse) {
                 furi_mutex_acquire(app->mutex, FuriWaitForever);
                 int n = app->file_count;
@@ -508,8 +743,30 @@ static void run_viewport(SstvApp* app) {
                     if(ev.input.key == InputKeyUp) app->file_index = (app->file_index + n - TILES_PER_PAGE % n) % n;
                 }
                 furi_mutex_release(app->mutex);
-                if(ev.input.key == InputKeyBack && ev.input.type == InputTypeShort) leave = true;
+                if(ev.input.key == InputKeyBack && ev.input.type == InputTypeShort) set_state(app, StateMenu);
                 if(ev.input.key == InputKeyOk && ev.input.type == InputTypeShort && open_file(app)) set_state(app, StatePreview);
+                view_port_update(app->vp);
+                break;
+            }
+            if(app->state == StateNoteList) {
+                if(ev.input.key == InputKeyDown) app->note_index = (app->note_index + 1) % NOTE_LIST_LEN;
+                if(ev.input.key == InputKeyUp) app->note_index = (app->note_index + NOTE_LIST_LEN - 1) % NOTE_LIST_LEN;
+                if(ev.input.key == InputKeyBack && ev.input.type == InputTypeShort) set_state(app, StateMenu);
+                if(ev.input.key == InputKeyOk && ev.input.type == InputTypeShort) {
+                    if(app->note_index == 0) {
+                        app->note_text[0] = 0;
+                    } else {
+                        strncpy(app->note_text, SSTV_NOTE_PRESETS[app->note_index - 1], SSTV_NOTE_MAX_CHARS);
+                        app->note_text[SSTV_NOTE_MAX_CHARS] = 0;
+                    }
+                    set_state(app, edit_note(app) ? StateNotePreview : StateNoteList);
+                }
+                view_port_update(app->vp);
+                break;
+            }
+            if(app->state == StateNotePreview) {
+                if(ev.input.key == InputKeyBack && ev.input.type == InputTypeShort) set_state(app, StateNoteList);
+                if(ev.input.key == InputKeyOk && ev.input.type == InputTypeShort) start_tx_note(app);
                 view_port_update(app->vp);
                 break;
             }
@@ -522,22 +779,25 @@ static void run_viewport(SstvApp* app) {
                     /* first Back pauses; while paused, Back stops */
                     if(sstv_tx_is_paused()) {
                         sstv_tx_stop();
-                        set_state(app, StatePreview);
+                        set_state(app, app->is_note ? StateNotePreview : StatePreview);
                     } else {
                         sstv_tx_pause();
                         view_port_update(app->vp);
                     }
                 } else if(app->state == StateDone) {
                     sstv_tx_stop();
-                    set_state(app, StatePreview);
+                    set_state(app, app->is_note ? StateNotePreview : StatePreview);
                 } else {
-                    set_state(app, StateBrowse);
+                    set_state(app, StateMenu);
                 }
             } else if(ev.input.key == InputKeyOk) {
                 if(app->state == StateTransmit && sstv_tx_is_paused()) {
                     sstv_tx_resume();
                     view_port_update(app->vp);
-                } else if(app->state == StatePreview || app->state == StateDone) {
+                } else if(app->state == StateDone) {
+                    if(app->is_note) start_tx_note(app);
+                    else start_tx(app);
+                } else if(app->state == StatePreview) {
                     start_tx(app);
                 }
             }

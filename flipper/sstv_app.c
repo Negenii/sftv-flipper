@@ -212,7 +212,8 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
         canvas_draw_str(canvas, PANEL_X, 9, app->coded ? "TX zip" : "TX raw");
         float p = app->frames_total ? (float)app->frames_sent / app->frames_total : 0.0f;
         elements_progress_bar(canvas, PANEL_X, 12, w, p);
-        snprintf(buf, sizeof buf, "%u/%u", app->frames_sent, app->frames_total);
+        int pct10 = app->frames_total ? (int)((uint32_t)app->frames_sent * 1000u / app->frames_total) : 0;
+        snprintf(buf, sizeof buf, "%d.%d%%", pct10 / 10, pct10 % 10);
         canvas_draw_str(canvas, PANEL_X, 32, buf);
         uint32_t left_s = (uint32_t)(app->frames_total - app->frames_sent) * (SSTV_PHYS_US / 1000) / 1000;
         snprintf(buf, sizeof buf, "~%lu:%02lu", (unsigned long)(left_s / 60), (unsigned long)(left_s % 60));

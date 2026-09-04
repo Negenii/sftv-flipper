@@ -19,6 +19,9 @@
 
 #define TAG "SftvTx"
 #define SSTV_DATA_DIR EXT_PATH("apps_data/sftv_tx")
+#define MAX_USER_NOTES 16
+#define UN_STRIDE (SSTV_NOTE_MAX_CHARS + 1)
+#define NOTES_PATH SSTV_DATA_DIR "/notes.txt"
 #define SSTV_OLD_DATA_DIR EXT_PATH("apps_data/sstv_tx") /* before the rename to SFTV */
 #define SSTV_FILE_MAX (SSTV_IMAGE_BYTES + 256)
 #define MAX_FILES 64
@@ -75,6 +78,10 @@ typedef struct {
     char note_text[SSTV_NOTE_MAX_CHARS + 1];
     char note_name[SSTV_NAME_MAX + 1];
     ViewDispatcher* kbd_vd; /* temporary dispatcher used only for the note keyboard */
+    char* user_notes; /* MAX_USER_NOTES * UN_STRIDE saved notes, persisted to notes.txt */
+    int user_note_count;
+    int editing_user_idx; /* user-note index behind the current preview/edit, -1 = new or preset */
+    bool note_del_confirm; /* preview: confirming deletion of a saved note */
     FuriThread* led_thread; /* follows the symbol on the speaker while transmitting */
     volatile bool led_run;
 } SstvApp;
@@ -457,15 +464,70 @@ static void draw_menu(Canvas* canvas, SstvApp* app) {
 }
 
 /* ---- note list (New note + presets) ---- */
-#define NOTE_LIST_LEN (1 + SSTV_NOTE_PRESET_COUNT)
-static void note_list_label(int idx, char* out, size_t cap) {
-    if(idx == 0) {
-        strncpy(out, "New note...", cap - 1);
-        out[cap - 1] = 0;
-    } else {
-        strncpy(out, SSTV_NOTE_PRESETS[idx - 1], cap - 1);
-        out[cap - 1] = 0;
+#define NOTE_LIST_LEN(app) (1 + (app)->user_note_count + SSTV_NOTE_PRESET_COUNT)
+
+static char* un_ptr(SstvApp* app, int i) {
+    return app->user_notes + (size_t)i * UN_STRIDE;
+}
+static void load_user_notes(SstvApp* app) {
+    app->user_note_count = 0;
+    File* f = storage_file_alloc(app->storage);
+    if(storage_file_open(f, NOTES_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        uint64_t size = storage_file_size(f);
+        if(size > 0 && size < 60000) {
+            char* buf = malloc((size_t)size + 1);
+            uint16_t got = storage_file_read(f, buf, (uint16_t)size);
+            buf[got] = 0;
+            char* q = buf;
+            while(*q && app->user_note_count < MAX_USER_NOTES) {
+                char* nl = strchr(q, '\n');
+                if(nl) *nl = 0;
+                if(*q) {
+                    strncpy(un_ptr(app, app->user_note_count), q, SSTV_NOTE_MAX_CHARS);
+                    un_ptr(app, app->user_note_count)[SSTV_NOTE_MAX_CHARS] = 0;
+                    app->user_note_count++;
+                }
+                if(!nl) break;
+                q = nl + 1;
+            }
+            free(buf);
+        }
     }
+    storage_file_close(f);
+    storage_file_free(f);
+}
+static void save_user_notes(SstvApp* app) {
+    File* f = storage_file_alloc(app->storage);
+    if(storage_file_open(f, NOTES_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        for(int i = 0; i < app->user_note_count; i++) {
+            const char* str = un_ptr(app, i);
+            storage_file_write(f, str, (uint16_t)strlen(str));
+            storage_file_write(f, "\n", 1);
+        }
+    }
+    storage_file_close(f);
+    storage_file_free(f);
+}
+static int add_user_note(SstvApp* app, const char* text) {
+    if(app->user_note_count >= MAX_USER_NOTES) return -1;
+    int i = app->user_note_count++;
+    strncpy(un_ptr(app, i), text, SSTV_NOTE_MAX_CHARS);
+    un_ptr(app, i)[SSTV_NOTE_MAX_CHARS] = 0;
+    return i;
+}
+static void delete_user_note(SstvApp* app, int idx) {
+    if(idx < 0 || idx >= app->user_note_count) return;
+    for(int i = idx; i + 1 < app->user_note_count; i++)
+        memcpy(un_ptr(app, i), un_ptr(app, i + 1), UN_STRIDE);
+    app->user_note_count--;
+}
+
+static void note_list_label(SstvApp* app, int idx, char* out, size_t cap) {
+    const char* src = "New note...";
+    if(idx > 0 && idx <= app->user_note_count) src = un_ptr(app, idx - 1);
+    else if(idx > app->user_note_count) src = SSTV_NOTE_PRESETS[idx - 1 - app->user_note_count];
+    strncpy(out, src, cap - 1);
+    out[cap - 1] = 0;
 }
 
 static void draw_note_list(Canvas* canvas, SstvApp* app) {
@@ -476,10 +538,10 @@ static void draw_note_list(Canvas* canvas, SstvApp* app) {
     int first = app->note_index - app->note_index % rows;
     for(int r = 0; r < rows; r++) {
         int idx = first + r;
-        if(idx >= NOTE_LIST_LEN) break;
+        if(idx >= NOTE_LIST_LEN(app)) break;
         int y = 16 + r * rh; /* box top */
         char label[64];
-        note_list_label(idx, label, sizeof label);
+        note_list_label(app, idx, label, sizeof label);
         note_font_begin(canvas);
         /* fit to width by dropping whole UTF-8 codepoints */
         while(canvas_string_width(canvas, label) > 112 && label[0]) {
@@ -496,7 +558,7 @@ static void draw_note_list(Canvas* canvas, SstvApp* app) {
         note_font_end(canvas);
     }
     canvas_draw_icon(canvas, 2, 54, &I_Ok_btn_9x9);
-    canvas_draw_str(canvas, 14, 62, app->note_index == 0 ? "type" : "send");
+    canvas_draw_str(canvas, 14, 62, app->note_index == 0 ? "type" : "open");
     canvas_draw_icon(canvas, 44, 53, &I_back_10px);
     canvas_draw_str(canvas, 56, 62, "back");
 }
@@ -516,10 +578,19 @@ static void draw_note_preview(Canvas* canvas, SstvApp* app) {
     note_draw_wrapped(canvas, app->note_text, 4, 13 + pfh, 120, plh, pml);
     note_font_end(canvas);
     canvas_draw_icon(canvas, 2, 54, &I_Ok_btn_9x9);
-    canvas_draw_str(canvas, 14, 62, "send");
-    canvas_draw_str(canvas, 44, 62, "^ edit");
-    canvas_draw_icon(canvas, 78, 53, &I_back_10px);
-    canvas_draw_str(canvas, 90, 62, "back");
+    canvas_draw_str(canvas, 13, 62, "send");
+    canvas_draw_str(canvas, 40, 62, "^edit");
+    if(app->editing_user_idx >= 0) canvas_draw_str(canvas, 72, 62, "<del");
+    canvas_draw_icon(canvas, 116, 53, &I_back_10px);
+    if(app->note_del_confirm) {
+        int bw = 96, bx = (128 - bw) / 2, by = 20, bh = 24;
+        canvas_set_color(canvas, ColorWhite);
+        canvas_draw_box(canvas, bx, by, bw, bh);
+        canvas_set_color(canvas, ColorBlack);
+        canvas_draw_frame(canvas, bx, by, bw, bh);
+        canvas_draw_str(canvas, bx + 6, by + 10, "Delete note?");
+        canvas_draw_str(canvas, bx + 6, by + 20, "OK yes   Back no");
+    }
 }
 
 static void draw_callback(Canvas* canvas, void* ctx) {
@@ -872,18 +943,32 @@ static void run_viewport(SstvApp* app) {
                 break;
             }
             if(app->state == StateNoteList) {
-                if(ev.input.key == InputKeyDown) app->note_index = (app->note_index + 1) % NOTE_LIST_LEN;
-                if(ev.input.key == InputKeyUp) app->note_index = (app->note_index + NOTE_LIST_LEN - 1) % NOTE_LIST_LEN;
+                int len = NOTE_LIST_LEN(app);
+                if(ev.input.key == InputKeyDown) app->note_index = (app->note_index + 1) % len;
+                if(ev.input.key == InputKeyUp) app->note_index = (app->note_index + len - 1) % len;
                 if(ev.input.key == InputKeyBack && ev.input.type == InputTypeShort) set_state(app, StateMenu);
                 if(ev.input.key == InputKeyOk && ev.input.type == InputTypeShort) {
                     if(app->note_index == 0) {
                         app->note_text[0] = 0;
-                        set_state(app, edit_note(app) ? StateNotePreview : StateNoteList);
-                    } else {
-                        /* presets (often Cyrillic) go straight to the preview; the ASCII
-                         * keyboard cannot edit UTF-8, so editing is offered only from there */
-                        strncpy(app->note_text, SSTV_NOTE_PRESETS[app->note_index - 1], SSTV_NOTE_MAX_CHARS);
+                        app->editing_user_idx = -1;
+                        if(edit_note(app)) {
+                            /* Save adds it to the saved list, then goes to the preview to send */
+                            app->editing_user_idx = add_user_note(app, app->note_text);
+                            save_user_notes(app);
+                            set_state(app, StateNotePreview);
+                        } else {
+                            set_state(app, StateNoteList);
+                        }
+                    } else if(app->note_index <= app->user_note_count) {
+                        strncpy(app->note_text, un_ptr(app, app->note_index - 1), SSTV_NOTE_MAX_CHARS);
                         app->note_text[SSTV_NOTE_MAX_CHARS] = 0;
+                        app->editing_user_idx = app->note_index - 1;
+                        set_state(app, StateNotePreview);
+                    } else {
+                        /* preset: edit-in-place is offered from the preview (ASCII keyboard) */
+                        strncpy(app->note_text, SSTV_NOTE_PRESETS[app->note_index - 1 - app->user_note_count], SSTV_NOTE_MAX_CHARS);
+                        app->note_text[SSTV_NOTE_MAX_CHARS] = 0;
+                        app->editing_user_idx = -1;
                         set_state(app, StateNotePreview);
                     }
                 }
@@ -891,9 +976,30 @@ static void run_viewport(SstvApp* app) {
                 break;
             }
             if(app->state == StateNotePreview) {
+                if(app->note_del_confirm) {
+                    if(ev.input.key == InputKeyOk && ev.input.type == InputTypeShort) {
+                        delete_user_note(app, app->editing_user_idx);
+                        save_user_notes(app);
+                        app->note_del_confirm = false;
+                        app->editing_user_idx = -1;
+                        set_state(app, StateNoteList);
+                    } else if(ev.input.key == InputKeyBack && ev.input.type == InputTypeShort) {
+                        app->note_del_confirm = false;
+                    }
+                    view_port_update(app->vp);
+                    break;
+                }
                 if(ev.input.key == InputKeyBack && ev.input.type == InputTypeShort) set_state(app, StateNoteList);
-                if(ev.input.key == InputKeyUp && ev.input.type == InputTypeShort)
-                    set_state(app, edit_note(app) ? StateNotePreview : StateNotePreview);
+                if(ev.input.key == InputKeyUp && ev.input.type == InputTypeShort) {
+                    if(edit_note(app) && app->editing_user_idx >= 0) {
+                        strncpy(un_ptr(app, app->editing_user_idx), app->note_text, SSTV_NOTE_MAX_CHARS);
+                        un_ptr(app, app->editing_user_idx)[SSTV_NOTE_MAX_CHARS] = 0;
+                        save_user_notes(app);
+                    }
+                    set_state(app, StateNotePreview);
+                }
+                if(ev.input.key == InputKeyLeft && ev.input.type == InputTypeShort && app->editing_user_idx >= 0)
+                    app->note_del_confirm = true;
                 if(ev.input.key == InputKeyOk && ev.input.type == InputTypeShort) start_tx_note(app);
                 view_port_update(app->vp);
                 break;
@@ -916,6 +1022,8 @@ static void run_viewport(SstvApp* app) {
                 } else if(app->state == StateDone) {
                     sstv_tx_stop();
                     set_state(app, app->is_note ? StateNotePreview : StatePreview);
+                } else if(app->state == StatePreview) {
+                    set_state(app, StateBrowse);
                 } else {
                     set_state(app, StateMenu);
                 }
@@ -946,6 +1054,8 @@ int32_t sftv_app_main(void* p) {
     app->mutex = furi_mutex_alloc(FuriMutexTypeNormal);
     app->path = furi_string_alloc();
     app->image = malloc(SSTV_IMAGE_BYTES);
+    app->user_notes = malloc((size_t)MAX_USER_NOTES * UN_STRIDE);
+    app->editing_user_idx = -1;
     app->gui = furi_record_open(RECORD_GUI);
     app->vp = view_port_alloc();
     view_port_draw_callback_set(app->vp, draw_callback, app);
@@ -962,6 +1072,7 @@ int32_t sftv_app_main(void* p) {
         storage_common_rename(app->storage, SSTV_OLD_DATA_DIR, SSTV_DATA_DIR);
     }
     storage_simply_mkdir(app->storage, SSTV_DATA_DIR);
+    load_user_notes(app);
     scan_files(app);
     run_viewport(app);
 
@@ -973,6 +1084,7 @@ int32_t sftv_app_main(void* p) {
     led_stop(app);
     furi_hal_light_set(LightRed | LightGreen | LightBlue, 0);
     free(app->image);
+    free(app->user_notes);
     furi_string_free(app->path);
     furi_mutex_free(app->mutex);
     furi_message_queue_free(app->queue);

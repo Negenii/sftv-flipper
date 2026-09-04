@@ -413,50 +413,60 @@ static void draw_note_list(Canvas* canvas, SstvApp* app) {
     canvas_draw_str(canvas, 56, 62, "back");
 }
 
-/* Word-wrapped note text in a box; used for the preview. */
+/* Word-wrapped note text in a box; breaks on spaces and hard-breaks any word wider than `w`
+ * so a long unbroken string never spills past the frame. */
 static void draw_wrapped(Canvas* canvas, const char* text, int x0, int y0, int w, int line_h, int max_lines) {
-    char line[64];
-    int ll = 0, lines = 0, y = y0;
-    const char* p = text;
-    while(*p && lines < max_lines) {
-        /* take the next word */
-        const char* ws = p;
-        while(*ws == ' ') ws++;
-        const char* we = ws;
-        while(*we && *we != ' ') we++;
-        int wlen = (int)(we - ws);
-        char cand[64];
-        int cl = ll;
-        if(cl > 0) cand[cl++] = ' ';
-        for(int i = 0; i < wlen && cl < (int)sizeof cand - 1; i++) cand[cl++] = ws[i];
-        cand[cl] = 0;
-        if(canvas_string_width(canvas, cand) <= w || ll == 0) {
-            memcpy(line, cand, cl + 1);
-            ll = cl;
-        } else {
+    char line[80];
+    int ll = 0, lines = 0, y = y0, last_space = -1;
+    for(const char* p = text;; p++) {
+        char c = *p;
+        if(c == '\n' || c == 0) {
             line[ll] = 0;
             canvas_draw_str(canvas, x0, y, line);
             y += line_h;
             lines++;
             ll = 0;
-            if(wlen < (int)sizeof line) {
-                memcpy(line, ws, wlen);
-                ll = wlen;
-                line[ll] = 0;
-            }
+            last_space = -1;
+            if(c == 0 || lines >= max_lines) return;
+            continue;
         }
-        p = we;
-    }
-    if(ll > 0 && lines < max_lines) {
-        line[ll] = 0;
-        canvas_draw_str(canvas, x0, y, line);
+        if(ll < (int)sizeof line - 1) {
+            line[ll] = c;
+            if(c == ' ') last_space = ll;
+            ll++;
+            line[ll] = 0;
+        }
+        if((int)canvas_string_width(canvas, line) > w) {
+            if(last_space > 0) { /* break at the last space, carry the rest */
+                line[last_space] = 0;
+                canvas_draw_str(canvas, x0, y, line);
+                int rem = ll - last_space - 1;
+                memmove(line, line + last_space + 1, (size_t)rem);
+                ll = rem;
+                line[ll] = 0;
+            } else { /* no space: hard break, push the last char to the next line */
+                char last = line[ll - 1];
+                line[ll - 1] = 0;
+                canvas_draw_str(canvas, x0, y, line);
+                line[0] = last;
+                ll = 1;
+                line[1] = 0;
+            }
+            y += line_h;
+            lines++;
+            last_space = -1;
+            if(lines >= max_lines) return;
+        }
     }
 }
 
 static void draw_note_preview(Canvas* canvas, SstvApp* app) {
+    char cnt[16];
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 2, 10, "Note");
     canvas_set_font(canvas, FontSecondary);
+    snprintf(cnt, sizeof cnt, "%u/%d", (unsigned)strlen(app->note_text), SSTV_NOTE_MAX_CHARS);
+    canvas_draw_str(canvas, 126 - canvas_string_width(canvas, cnt), 10, cnt);
     canvas_draw_frame(canvas, 1, 13, 126, 38);
     draw_wrapped(canvas, app->note_text, 4, 22, 120, 9, 4);
     canvas_draw_icon(canvas, 2, 54, &I_Ok_btn_9x9);
@@ -684,7 +694,7 @@ static bool edit_note(SstvApp* app) {
     ViewDispatcher* vd = view_dispatcher_alloc();
     app->kbd_vd = vd;
     TextInput* ti = text_input_alloc();
-    text_input_set_header_text(ti, "Note (ASCII, max 200)");
+    text_input_set_header_text(ti, "Type a note");
     text_input_set_result_callback(
         ti, note_kbd_result, app, app->note_text, SSTV_NOTE_MAX_CHARS + 1, false);
     view_dispatcher_set_event_callback_context(vd, app);

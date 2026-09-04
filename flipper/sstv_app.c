@@ -654,7 +654,7 @@ static void start_tx(SstvApp* app) {
 /* Derives the meta name (gallery label) from the first line of the note, capitalised. */
 static void note_make_name(SstvApp* app) {
     int n = 0;
-    for(const char* t = app->note_text; *t && *t != '\n' && n < SSTV_NAME_MAX; t++) app->note_name[n++] = *t;
+    for(const char* t = app->note_text; *t && *t != '\n' && n < SSTV_NOTE_NAME_MAX; t++) app->note_name[n++] = *t;
     app->note_name[n] = 0;
     if(n == 0) strcpy(app->note_name, "Note");
     if(app->note_name[0] >= 'a' && app->note_name[0] <= 'z') app->note_name[0] -= 32;
@@ -794,11 +794,13 @@ static void run_viewport(SstvApp* app) {
                 if(ev.input.key == InputKeyOk && ev.input.type == InputTypeShort) {
                     if(app->note_index == 0) {
                         app->note_text[0] = 0;
+                        set_state(app, edit_note(app) ? StateNotePreview : StateNoteList);
                     } else {
+                        /* a preset (may be UTF-8) goes straight to the preview, sent as-is */
                         strncpy(app->note_text, SSTV_NOTE_PRESETS[app->note_index - 1], SSTV_NOTE_MAX_CHARS);
                         app->note_text[SSTV_NOTE_MAX_CHARS] = 0;
+                        set_state(app, StateNotePreview);
                     }
-                    set_state(app, edit_note(app) ? StateNotePreview : StateNoteList);
                 }
                 view_port_update(app->vp);
                 break;

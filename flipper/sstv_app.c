@@ -334,107 +334,58 @@ static void draw_browse(Canvas* canvas, SstvApp* app) {
     canvas_draw_str(canvas, 126 - canvas_string_width(canvas, buf), 62, buf);
 }
 
-/* ---- Cyrillic/UTF-8 text (our own bitmap font, blitted by hand) ---- */
-static int fl_glyph(uint32_t cp) {
-    if(cp >= 0x20 && cp <= 0x7E) return (int)(cp - 0x20);
-    if(cp == 0x401) return 95; /* Ё */
-    if(cp == 0x451) return 96; /* ё */
-    if(cp >= 0x410 && cp <= 0x44F) return 97 + (int)(cp - 0x410);
-    if(cp == 0x2014 || cp == 0x2013) return (int)('-' - 0x20); /* em/en dash -> hyphen */
-    return -1;
+/* ---- Cyrillic/UTF-8 note text via the built-in u8g2 UTF-8 path ---- */
+/* Flipper's canvas_draw_str is u8g2_DrawUTF8 and canvas_string_width is u8g2_GetUTF8Width, so
+ * setting a Cyrillic-capable u8g2 font is all that's needed to render Russian. */
+static void note_font_begin(Canvas* c) {
+    canvas_set_custom_u8g2_font(c, u8g2_font_haxrcorp4089_t_cyrillic);
 }
-/* Decode one UTF-8 codepoint; advances *p. Returns 0 at the end. */
-static uint32_t fl_utf8(const char** p) {
-    const uint8_t* s = (const uint8_t*)*p;
-    uint32_t cp = *s;
-    if(cp < 0x80) {
-        *p += cp ? 1 : 0;
-        return cp;
-    } else if((cp & 0xE0) == 0xC0 && (s[1] & 0xC0) == 0x80) {
-        cp = ((cp & 0x1F) << 6) | (s[1] & 0x3F);
-        *p += 2;
-    } else if((cp & 0xF0) == 0xE0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80) {
-        cp = ((cp & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
-        *p += 3;
-    } else {
-        *p += 1;
-        cp = '?';
-    }
-    return cp;
+static void note_font_end(Canvas* c) {
+    canvas_set_font(c, FontSecondary);
 }
-static int fl_cp_width(uint32_t cp) {
-    int g = fl_glyph(cp);
-    return (g < 0 ? 4 : fl_font_w[g]) + 1; /* +1 tracking */
-}
-static int fl_text_width(const char* str) {
-    int w = 0;
-    const char* p = str;
-    uint32_t cp;
-    while((cp = fl_utf8(&p))) w += fl_cp_width(cp);
-    return w > 0 ? w - 1 : 0; /* drop the last tracking */
-}
-/* Draws str at baseline y (like canvas_draw_str). Returns the advance width. */
-static int fl_draw(Canvas* canvas, int x, int y, const char* str) {
-    int top = y - FL_FONT_ASCENT, x0 = x;
-    const char* p = str;
-    uint32_t cp;
-    while((cp = fl_utf8(&p))) {
-        int g = fl_glyph(cp);
-        if(g >= 0) {
-            int w = fl_font_w[g];
-            const uint8_t* bm = fl_font_bits + (size_t)g * FL_FONT_H * FL_FONT_STRIDE;
-            for(int row = 0; row < FL_FONT_H; row++)
-                for(int col = 0; col < w; col++)
-                    if(bm[row * FL_FONT_STRIDE + (col >> 3)] & (0x80 >> (col & 7)))
-                        canvas_draw_dot(canvas, x + col, top + row);
-            x += w + 1;
-        } else {
-            x += 5;
-        }
-    }
-    return x - x0;
-}
-/* Word-wrapped UTF-8 with hard break, baseline of the first line at y0. */
-static void fl_draw_wrapped(Canvas* canvas, const char* text, int x0, int y0, int w, int line_h, int max_lines) {
+/* Word-wrapped UTF-8 with hard break of overlong words. The note font must already be set;
+ * baseline of the first line is at y0. */
+static void note_draw_wrapped(Canvas* canvas, const char* text, int x0, int y0, int w, int line_h, int max_lines) {
     char line[256];
     int ll = 0, lines = 0, y = y0, last_space = -1;
     const char* p = text;
     for(;;) {
         const char* q = p;
-        uint32_t cp = fl_utf8(&p);
-        int adv = (int)(p - q); /* bytes consumed */
-        if(cp == '\n' || cp == 0) {
+        uint8_t b = (uint8_t)*p;
+        if(b == 0 || b == '\n') {
             line[ll] = 0;
-            fl_draw(canvas, x0, y, line);
+            canvas_draw_str(canvas, x0, y, line);
             y += line_h;
             lines++;
             ll = 0;
             last_space = -1;
-            if(cp == 0 || lines >= max_lines) return;
+            if(b == 0 || lines >= max_lines) return;
+            p++;
             continue;
         }
+        int adv = b < 0x80 ? 1 : (b & 0xE0) == 0xC0 ? 2 : (b & 0xF0) == 0xE0 ? 3 : (b & 0xF8) == 0xF0 ? 4 : 1;
         if(ll + adv < (int)sizeof line - 1) {
-            if(cp == ' ') last_space = ll;
+            if(b == ' ') last_space = ll;
             memcpy(line + ll, q, (size_t)adv);
             ll += adv;
             line[ll] = 0;
         }
-        if(fl_text_width(line) > w) {
+        p += adv;
+        if((int)canvas_string_width(canvas, line) > w) {
             if(last_space > 0) {
                 line[last_space] = 0;
-                fl_draw(canvas, x0, y, line);
+                canvas_draw_str(canvas, x0, y, line);
                 int rem = ll - last_space - 1;
                 memmove(line, line + last_space + 1, (size_t)rem);
                 ll = rem;
                 line[ll] = 0;
             } else {
-                /* hard break: drop the last codepoint to the next line */
                 int back = 1;
                 while(back < ll && ((uint8_t)line[ll - back] & 0xC0) == 0x80) back++;
                 char carry[8];
                 memcpy(carry, line + ll - back, (size_t)back);
                 line[ll - back] = 0;
-                fl_draw(canvas, x0, y, line);
+                canvas_draw_str(canvas, x0, y, line);
                 memcpy(line, carry, (size_t)back);
                 ll = back;
                 line[ll] = 0;
@@ -512,8 +463,9 @@ static void draw_note_list(Canvas* canvas, SstvApp* app) {
         int y = 16 + r * rh; /* box top */
         char label[64];
         note_list_label(idx, label, sizeof label);
+        note_font_begin(canvas);
         /* fit to width by dropping whole UTF-8 codepoints */
-        while(fl_text_width(label) > 112 && label[0]) {
+        while(canvas_string_width(canvas, label) > 112 && label[0]) {
             int n = (int)strlen(label), back = 1;
             while(back < n && ((uint8_t)label[n - back] & 0xC0) == 0x80) back++;
             label[n - back] = 0;
@@ -522,8 +474,9 @@ static void draw_note_list(Canvas* canvas, SstvApp* app) {
             canvas_draw_rbox(canvas, 2, y, 124, rh, 2);
             canvas_set_color(canvas, ColorWhite);
         }
-        fl_draw(canvas, 6, y + 9, label);
+        canvas_draw_str(canvas, 6, y + 9, label);
         canvas_set_color(canvas, ColorBlack);
+        note_font_end(canvas);
     }
     canvas_draw_icon(canvas, 2, 54, &I_Ok_btn_9x9);
     canvas_draw_str(canvas, 14, 62, app->note_index == 0 ? "type" : "edit");
@@ -539,7 +492,10 @@ static void draw_note_preview(Canvas* canvas, SstvApp* app) {
     snprintf(cnt, sizeof cnt, "%u/%d", (unsigned)strlen(app->note_text), SSTV_NOTE_MAX_CHARS);
     canvas_draw_str(canvas, 126 - canvas_string_width(canvas, cnt), 10, cnt);
     canvas_draw_frame(canvas, 1, 13, 126, 38);
-    fl_draw_wrapped(canvas, app->note_text, 4, 23, 120, 12, 3);
+    note_font_begin(canvas);
+    int lh = (int)canvas_current_font_height(canvas) + 2;
+    note_draw_wrapped(canvas, app->note_text, 4, 13 + lh - 1, 120, lh, 3);
+    note_font_end(canvas);
     canvas_draw_icon(canvas, 2, 54, &I_Ok_btn_9x9);
     canvas_draw_str(canvas, 14, 62, "send");
     canvas_draw_icon(canvas, 44, 53, &I_back_10px);
@@ -574,7 +530,10 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         /* a note has no picture sheet: show the text in a paper box, panel on the right */
         canvas_set_font(canvas, FontSecondary);
         canvas_draw_frame(canvas, 1, 2, PANEL_X - 5, 50);
-        fl_draw_wrapped(canvas, app->note_text, 4, 12, PANEL_X - 11, 12, 4);
+        note_font_begin(canvas);
+        int nlh = (int)canvas_current_font_height(canvas) + 2;
+        note_draw_wrapped(canvas, app->note_text, 4, 2 + nlh, PANEL_X - 11, nlh, 4);
+        note_font_end(canvas);
         draw_panel(canvas, app);
         furi_mutex_release(app->mutex);
         return;

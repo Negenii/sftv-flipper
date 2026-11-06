@@ -20,6 +20,11 @@ bool sstv_tx_start_note(const char* text, const char* name, SstvTxCallback cb, v
  * done = false. */
 #define SSTV_TEST_TONES 6
 bool sstv_tx_start_test(SstvTxCallback cb, void* ctx);
+/* HF sweep: 3 kHz reference + 12..21 kHz in 500 Hz steps, one per frame, looping. */
+bool sstv_tx_start_sweep(SstvTxCallback cb, void* ctx);
+/* Band for the next picture/note: SSTV_BAND_AUDIBLE (3-4 kHz) or SSTV_BAND_HF (18-21 kHz). */
+void sstv_tx_set_band(int band);
+int sstv_tx_band(void);
 
 /* Image lines completed once `frames_sent` physical frames are out (for progress display). */
 int sstv_tx_lines_after(int frames_sent);

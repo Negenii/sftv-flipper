@@ -5,6 +5,7 @@
 #include <storage/storage.h>
 #include <input/input.h>
 #include <furi_hal_light.h>
+#include <notification/notification_messages.h>
 
 #include "sstv_params.h"
 #include "pbm.h"
@@ -35,7 +36,7 @@ typedef enum {
     StatePreview,
     StateTransmit,
     StateDone,
-    StateTest, /* temporary tone test (hold Up in the browser), Back stops */
+    StateTest, /* temporary tone test (hold Up in the browser) or HF sweep (hold OK), Back stops */
 } AppState;
 
 typedef enum {
@@ -52,6 +53,9 @@ typedef struct {
 
 typedef struct {
     Gui* gui;
+    NotificationApp* notif;
+    bool sweep; /* StateTest is the HF sweep rather than the tone test */
+    bool backlight_held;
     ViewPort* vp;
     FuriMessageQueue* queue;
     FuriMutex* mutex;
@@ -245,6 +249,9 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
         break;
     case StatePreview:
         canvas_draw_str(canvas, PANEL_X, 9, "Ready");
+        /* sound band, Up/Down switches: audible 3-4 kHz or near-ultrasound 18-21 kHz */
+        canvas_draw_str(canvas, PANEL_X, 22, sstv_tx_band() == SSTV_BAND_HF ? "ultra" : "audible");
+        canvas_draw_str(canvas, PANEL_X, 32, "up/dn");
         hint(canvas, &I_Ok_btn_9x9, 9, "send", 52);
         hint(canvas, &I_back_10px, 10, "files", 63);
         break;
@@ -270,13 +277,14 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
             snprintf(buf, sizeof buf, "%d%%", pct);
         }
         canvas_draw_str(canvas, PANEL_X, 32, buf);
-        uint32_t left_s = (uint32_t)(app->frames_total - app->frames_sent) * (SSTV_PHYS_US / 1000) / 1000;
+        uint32_t left_s = (uint32_t)(app->frames_total - app->frames_sent) * (SSTV_BAND_PHYS_US(sstv_tx_band()) / 1000) / 1000;
         snprintf(buf, sizeof buf, "~%lu:%02lu", (unsigned long)(left_s / 60), (unsigned long)(left_s % 60));
         canvas_draw_str(canvas, PANEL_X, 42, buf);
         if(paused) {
             hint(canvas, &I_Ok_btn_9x9, 9, "resume", 52);
             hint(canvas, &I_back_10px, 10, "stop", 63);
         } else {
+            if(sstv_tx_band() == SSTV_BAND_HF) canvas_draw_str(canvas, PANEL_X, 52, "ultra");
             hint(canvas, &I_back_10px, 10, "pause", 63);
         }
         break;
@@ -284,7 +292,7 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
     case StateDone: {
         canvas_draw_str(canvas, PANEL_X, 9, "Done");
         elements_progress_bar(canvas, PANEL_X, 12, w, 1.0f);
-        uint32_t total_s = (uint32_t)app->frames_total * (SSTV_PHYS_US / 1000) / 1000;
+        uint32_t total_s = (uint32_t)app->frames_total * (SSTV_BAND_PHYS_US(sstv_tx_band()) / 1000) / 1000;
         snprintf(buf, sizeof buf, "%lu:%02lu", (unsigned long)(total_s / 60), (unsigned long)(total_s % 60));
         canvas_draw_str(canvas, PANEL_X, 32, buf);
         hint(canvas, &I_Ok_btn_9x9, 9, "again", 52);
@@ -627,6 +635,17 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         furi_mutex_release(app->mutex);
         return;
     }
+    if(app->state == StateTest && app->sweep) {
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 2, 12, "HF sweep");
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str(canvas, 2, 26, "3 kHz ref, then 12-21 kHz");
+        canvas_draw_str(canvas, 2, 36, "500 Hz steps, 0.4 s each");
+        canvas_draw_str(canvas, 2, 46, "13.4 s cycle, looping");
+        hint(canvas, &I_back_10px, 10, "stop", 63);
+        furi_mutex_release(app->mutex);
+        return;
+    }
     if(app->state == StateTest) {
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str(canvas, 2, 12, "Tone test");
@@ -750,10 +769,18 @@ static void set_state(SstvApp* app, AppState s) {
         app->lines_done = 0;
     }
     furi_mutex_release(app->mutex);
-    if(s == StateTransmit || s == StateTest) {
+    bool tx = (s == StateTransmit || s == StateTest);
+    if(tx) {
         led_start(app);
     } else {
         led_stop(app);
+    }
+    /* keep the screen lit for the whole transmission, back to the user's timeout after */
+    if(tx != app->backlight_held) {
+        notification_message(
+            app->notif,
+            tx ? &sequence_display_backlight_enforce_on : &sequence_display_backlight_enforce_auto);
+        app->backlight_held = tx;
     }
     if(s != StateMenu) {
         icon_animation_stop(app->scan_anim);
@@ -879,8 +906,9 @@ static bool edit_note(SstvApp* app) {
     return g_note_kbd_ok;
 }
 
-static void start_test(SstvApp* app) {
-    if(sstv_tx_start_test(tx_callback, app)) {
+static void start_test(SstvApp* app, bool sweep) {
+    app->sweep = sweep;
+    if(sweep ? sstv_tx_start_sweep(tx_callback, app) : sstv_tx_start_test(tx_callback, app)) {
         set_state(app, StateTest);
     } else {
         FURI_LOG_E(TAG, "speaker busy");
@@ -909,7 +937,11 @@ static void run_viewport(SstvApp* app) {
             break;
         case EvInput:
             if(app->state == StateBrowse && ev.input.type == InputTypeLong && ev.input.key == InputKeyUp) {
-                start_test(app);
+                start_test(app, false);
+                break;
+            }
+            if(app->state == StateBrowse && ev.input.type == InputTypeLong && ev.input.key == InputKeyOk) {
+                start_test(app, true); /* HF sweep for the near-ultrasound test (hold OK) */
                 break;
             }
             if(ev.input.type != InputTypeShort && ev.input.type != InputTypeRepeat) break;
@@ -1006,6 +1038,11 @@ static void run_viewport(SstvApp* app) {
                 break;
             }
             if(ev.input.type != InputTypeShort) break;
+            if(app->state == StatePreview && (ev.input.key == InputKeyUp || ev.input.key == InputKeyDown)) {
+                sstv_tx_set_band(sstv_tx_band() == SSTV_BAND_HF ? SSTV_BAND_AUDIBLE : SSTV_BAND_HF);
+                view_port_update(app->vp);
+                break;
+            }
             if(ev.input.key == InputKeyBack) {
                 if(app->state == StateTest) {
                     sstv_tx_stop();
@@ -1044,6 +1081,10 @@ static void run_viewport(SstvApp* app) {
         }
     }
     sstv_tx_stop();
+    if(app->backlight_held) {
+        notification_message(app->notif, &sequence_display_backlight_enforce_auto);
+        app->backlight_held = false;
+    }
     gui_remove_view_port(app->gui, app->vp);
 }
 
@@ -1058,6 +1099,7 @@ int32_t sftv_app_main(void* p) {
     app->user_notes = malloc((size_t)MAX_USER_NOTES * UN_STRIDE);
     app->editing_user_idx = -1;
     app->gui = furi_record_open(RECORD_GUI);
+    app->notif = furi_record_open(RECORD_NOTIFICATION);
     app->vp = view_port_alloc();
     view_port_draw_callback_set(app->vp, draw_callback, app);
     view_port_input_callback_set(app->vp, input_callback, app);
@@ -1086,6 +1128,7 @@ int32_t sftv_app_main(void* p) {
     icon_animation_free(app->note_anim);
     view_port_free(app->vp);
     furi_record_close(RECORD_GUI);
+    furi_record_close(RECORD_NOTIFICATION);
     led_stop(app);
     furi_hal_light_set(LightRed | LightGreen | LightBlue, 0);
     free(app->image);

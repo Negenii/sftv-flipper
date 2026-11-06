@@ -3,7 +3,7 @@ App(
     name="SFTV TX",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="sftv_app_main",
-    requires=["gui", "storage"],
+    requires=["gui", "storage", "notification"],
     stack_size=4 * 1024, # sstv_build_physical keeps ~1.5 kB of buffers on the stack
     fap_category="Tools",
     fap_icon="icon_10px.png",

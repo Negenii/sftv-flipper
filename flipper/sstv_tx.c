@@ -38,10 +38,17 @@ typedef struct {
     volatile TxPhase phase;
     volatile uint16_t line; /* physical frame index */
     uint16_t symbol; /* next symbol index within the frame */
-    uint16_t leader_left; /* leader symbols still to send (cycling tone 0,1,2,3) */
+    uint16_t leader_left; /* leader symbols still to send */
+    bool ladder; /* start leader: tone ladder (sstv_leader_symbol); resume leader: cycling 0..3 */
+    uint8_t lock_left; /* lock frames still to send after the start ladder (preamble) */
+    uint8_t lock[SSTV_FRAME_BYTES]; /* lock-frame pattern */
     int pending_line; /* physical frame whose last symbol was just programmed, -1 none */
     bool loop; /* restart from frame 0 after the last one */
     bool test; /* tone test: symbols from test_pattern with test_tone_hz instead of frames */
+    bool sweep; /* HF sweep (inside the test mode): one frequency step per frame */
+    int band; /* SSTV_BAND_AUDIBLE or SSTV_BAND_HF (near-ultrasound tones and sync) */
+    uint8_t sync_part; /* HF sync is sent as SYNC_PARTS back-to-back 4 ms pieces */
+    int32_t hf_err_ticks; /* HF symbol timing accumulator (see hf_cycles) */
     /* pause/resume: a prebuilt control block (4 interleaved physical frames) is played
      * between data frames; then the sequencer either holds silent (pause) or continues. */
     uint8_t ctrl[SSTV_ILEAVE * SSTV_FRAME_BYTES];
@@ -59,6 +66,7 @@ typedef struct {
 } SstvTx;
 
 static SstvTx tx = {0};
+static int next_band = SSTV_BAND_AUDIBLE; /* band for the next start (sstv_tx_set_band) */
 
 static const int tone_hz[SSTV_NUM_TONES] = SSTV_TONES_INIT;
 static const int tone_duty[SSTV_NUM_TONES] = SSTV_TONE_DUTY_PCT_INIT;
@@ -67,11 +75,37 @@ static const int tone_duty[SSTV_NUM_TONES] = SSTV_TONE_DUTY_PCT_INIT;
 #define ARR_SYNC ARR_FOR(SSTV_FSYNC_HZ) /* 12799 -> 5000.0 Hz */
 #define CYCLES_SYNC CYCLES_FOR(SSTV_FSYNC_HZ, SSTV_SYNC_US) /* 80 at 16 ms, fits 8-bit RCR */
 
+static const int hf_tone_hz[SSTV_MAX_TONES] = SSTV_HF_TONES_INIT;
+#define HF_SYMBOL_TICKS ((uint32_t)(TX_TIMER_CLK_HZ / 1000000UL * SSTV_HF_SYMBOL_US)) /* 192000 */
+
+/* HF symbols: not every tone fits a whole number of cycles into 3 ms (18.5 kHz = 55.5), so the
+ * cycle count is chosen per symbol to keep the accumulated time error under one cycle: the
+ * average symbol is exactly 3 ms in timer ticks, whatever the rounding of ARR. */
+static uint32_t hf_cycles(uint32_t arr) {
+    uint32_t period = arr + 1; /* ticks per cycle */
+    tx.hf_err_ticks += (int32_t)HF_SYMBOL_TICKS;
+    int32_t c = (tx.hf_err_ticks + (int32_t)period / 2) / (int32_t)period;
+    if(c < 1) c = 1;
+    tx.hf_err_ticks -= c * (int32_t)period;
+    return (uint32_t)c;
+}
+/* The repetition counter is 8 bits: a 16 ms sync at 20.5 kHz is 328 cycles, so the HF sync goes
+ * out as 4 back-to-back pieces of 4 ms (82 cycles each), one continuous burst on the air. HF data
+ * symbols are 3 ms (SSTV_HF_SYMBOL_US). */
+#define SYNC_PIECE_US 4000
+#define SYNC_PARTS (SSTV_SYNC_US / SYNC_PIECE_US)
+
 static inline void tone_settings(int v, uint32_t* arr, uint32_t* cycles, uint32_t* duty_pct) {
+    if(tx.band == SSTV_BAND_HF) {
+        *arr = ARR_FOR(hf_tone_hz[v] ? hf_tone_hz[v] : 3000); /* (no silence in the HF set now) */
+        *cycles = hf_cycles(*arr);
+        *duty_pct = hf_tone_hz[v] ? SSTV_HF_DUTY_PCT : 0;
+        return;
+    }
     if(tone_hz[v] == 0) {
         /* Silence: keep the timer running at 3000 Hz for the symbol length with 0 % duty. */
         *arr = ARR_FOR(3000);
-        *cycles = CYCLES_FOR(3000, SSTV_SYMBOL_US);
+        *cycles = CYCLES_FOR(3000, SSTV_BAND_SYMBOL_US(tx.band)); /* 12 at 4 ms, 9 at 3 ms */
         *duty_pct = 0;
         return;
     }
@@ -97,6 +131,15 @@ static inline void test_tone_settings(int v, uint32_t* arr, uint32_t* cycles, ui
     *duty_pct = (uint32_t)test_tone_duty[v];
 }
 
+/* HF sweep for the near-ultrasound feasibility test (tools/hf_sweep.mjs analyses a recording):
+ * frame k of each 20-frame cycle = sync, then SWEEP_ON symbols of one tone, then silence.
+ * Step 0 is a 3000 Hz reference (the data band), steps 1..19 are 12.0..21.0 kHz in 500 Hz. */
+#define SWEEP_STEPS 20
+#define SWEEP_ON 100 /* 400 ms of tone, then 256 ms of silence */
+static inline int sweep_hz(int step) {
+    return step == 0 ? 3000 : 12000 + (step - 1) * 500;
+}
+
 /* Fixed pseudo-random symbol order (LCG, seed 1), reproduced by the analysis script. */
 static void test_pattern_fill(uint8_t* out) {
     uint32_t x = 1;
@@ -114,31 +157,54 @@ static void tx_next_symbol(uint32_t* arr, uint32_t* cycles, uint32_t* duty_pct) 
     case PhaseLeader:
         if(tx.leader_left > 0) {
             tx.leader_left--;
-            tx.queued = tx.leader_left % SSTV_NUM_TONES;
+            tx.queued = tx.ladder ? sstv_leader_symbol(SSTV_BAND_LEADER_SYMBOLS(tx.band) - 1 - tx.leader_left) :
+                                    tx.leader_left % SSTV_BAND_NUM_TONES(tx.band);
             tone_settings(tx.queued, arr, cycles, duty_pct);
             return;
         }
         tx.phase = PhaseSync;
         /* fall through */
     case PhaseSync:
+        if(tx.band == SSTV_BAND_HF) {
+            *arr = ARR_FOR(SSTV_HF_FSYNC_HZ);
+            *cycles = CYCLES_FOR(SSTV_HF_FSYNC_HZ, SYNC_PIECE_US);
+            if(++tx.sync_part < SYNC_PARTS) return; /* more sync pieces follow */
+            tx.sync_part = 0;
+        } else {
+            *arr = ARR_SYNC;
+            *cycles = CYCLES_SYNC;
+        }
         tx.phase = PhaseBits;
         tx.symbol = 0;
-        *arr = ARR_SYNC;
-        *cycles = CYCLES_SYNC;
         return;
     case PhaseBits:
-        if(tx.test) {
+        if(tx.test && tx.sweep) {
+            int hz = sweep_hz(tx.line % SWEEP_STEPS);
+            tx.queued = tx.symbol < SWEEP_ON ? 1 : 0;
+            *arr = ARR_FOR(tx.queued ? hz : 3000);
+            *cycles = CYCLES_FOR(tx.queued ? hz : 3000, SSTV_SYMBOL_US);
+            *duty_pct = tx.queued ? 50 : 0;
+        } else if(tx.test) {
             tx.queued = tx.test_pattern[tx.symbol];
             test_tone_settings(tx.queued, arr, cycles, duty_pct);
+        } else if(tx.lock_left > 0) {
+            tx.queued = sstv_frame_symbol_bits(tx.lock, tx.symbol, SSTV_BAND_BITS(tx.band));
+            tone_settings(tx.queued, arr, cycles, duty_pct);
         } else if(tx.ctrl_line >= 0) {
-            tx.queued = sstv_frame_symbol(tx.ctrl + tx.ctrl_line * SSTV_FRAME_BYTES, tx.symbol);
+            tx.queued = sstv_frame_symbol_bits(tx.ctrl + tx.ctrl_line * SSTV_FRAME_BYTES, tx.symbol, SSTV_BAND_BITS(tx.band));
             tone_settings(tx.queued, arr, cycles, duty_pct);
         } else {
-            tx.queued = sstv_frame_symbol(tx.frames + tx.line * SSTV_FRAME_BYTES, tx.symbol);
+            tx.queued = sstv_frame_symbol_bits(tx.frames + tx.line * SSTV_FRAME_BYTES, tx.symbol, SSTV_BAND_BITS(tx.band));
             tone_settings(tx.queued, arr, cycles, duty_pct);
         }
         tx.symbol++;
-        if(tx.symbol >= SSTV_SYMBOLS_PER_FRAME) {
+        if(tx.symbol >= (tx.test ? SSTV_SYMBOLS_PER_FRAME : SSTV_BAND_SYMBOLS_PER_FRAME(tx.band))) {
+            if(tx.lock_left > 0) {
+                /* a preamble lock frame just finished; not part of the pass */
+                tx.lock_left--;
+                tx.phase = PhaseSync;
+                return;
+            }
             if(tx.ctrl_line >= 0) {
                 /* a control-block frame just finished; it is not counted in the pass */
                 tx.ctrl_line++;
@@ -205,6 +271,7 @@ static void tx_isr(void* context) {
         tx.ctrl_line = 0;
         tx.ctrl_is_pause = false;
         tx.leader_left = SSTV_RESUME_LEADER_SYMBOLS;
+        tx.ladder = false;
         tx.phase = PhaseLeader;
     }
     uint32_t arr, cycles, duty;
@@ -226,13 +293,19 @@ static void tx_isr(void* context) {
 
 /* Programs the timer and starts the sequencer; tx.frames/total/loop/test are set. */
 static bool tx_run(bool leader, SstvTxCallback cb, void* ctx) {
+    tx.band = tx.test ? SSTV_BAND_AUDIBLE : next_band; /* the tone test and sweep set their own tones */
     tx.cb = cb;
     tx.ctx = ctx;
     tx.line = 0;
     tx.symbol = 0;
     tx.pending_line = -1;
     tx.phase = PhaseLeader;
-    tx.leader_left = leader ? SSTV_LEADER_SYMBOLS : 0;
+    tx.leader_left = leader ? SSTV_BAND_LEADER_SYMBOLS(tx.band) : 0;
+    tx.hf_err_ticks = 0;
+    tx.ladder = leader;
+    tx.sync_part = 0;
+    tx.lock_left = leader ? SSTV_LOCK_FRAMES : 0; /* start preamble: ladder, then lock frames */
+    sstv_lock_frame(tx.lock);
     tx.ctrl_line = -1;
     tx.ctrl_is_pause = false;
     tx.pause_pending = false;
@@ -295,6 +368,7 @@ bool sstv_tx_start(const uint8_t* image_bits, const char* name, bool loop, SstvT
     }
     tx.loop = loop;
     tx.test = false;
+    tx.sweep = false;
     return tx_run(true, cb, ctx);
 }
 
@@ -308,6 +382,7 @@ bool sstv_tx_start_note(const char* text, const char* name, SstvTxCallback cb, v
     tx.coded = false;
     tx.loop = false;
     tx.test = false;
+    tx.sweep = false;
     return tx_run(true, cb, ctx);
 }
 
@@ -320,8 +395,15 @@ bool sstv_tx_start_test(SstvTxCallback cb, void* ctx) {
     tx.loop = true;
     tx.coded = false;
     tx.test = true;
+    tx.sweep = false;
     test_pattern_fill(tx.test_pattern);
     return tx_run(false, cb, ctx);
+}
+
+bool sstv_tx_start_sweep(SstvTxCallback cb, void* ctx) {
+    if(!sstv_tx_start_test(cb, ctx)) return false;
+    tx.sweep = true; /* first frame is the sync; the sweep symbols start after it */
+    return true;
 }
 
 void sstv_tx_stop(void) {
@@ -396,4 +478,12 @@ int sstv_tx_current_symbol(void) {
 bool sstv_tx_current_is_parity(void) {
     if(!tx.running || tx.test || tx.data_frames == 0) return false;
     return sstv_pass_frame_kind(tx.line, tx.data_frames, sstv_pass_intro(tx.coded)) == SSTV_PASS_PARITY;
+}
+
+void sstv_tx_set_band(int band) {
+    next_band = band == SSTV_BAND_HF ? SSTV_BAND_HF : SSTV_BAND_AUDIBLE;
+}
+
+int sstv_tx_band(void) {
+    return next_band;
 }

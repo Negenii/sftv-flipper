@@ -66,7 +66,7 @@ typedef struct {
 } SstvTx;
 
 static SstvTx tx = {0};
-static int next_band = SSTV_BAND_AUDIBLE; /* band for the next start (sstv_tx_set_band) */
+static int next_band = SSTV_BAND_HF; /* near-ultrasound only; the audible band is archived (git tag audible-mode-archive) */
 
 static const int tone_hz[SSTV_NUM_TONES] = SSTV_TONES_INIT;
 static const int tone_duty[SSTV_NUM_TONES] = SSTV_TONE_DUTY_PCT_INIT;

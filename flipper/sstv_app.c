@@ -249,9 +249,6 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
         break;
     case StatePreview:
         canvas_draw_str(canvas, PANEL_X, 9, "Ready");
-        /* sound band, Up/Down switches: audible 3-4 kHz or near-ultrasound 18-21 kHz */
-        canvas_draw_str(canvas, PANEL_X, 22, sstv_tx_band() == SSTV_BAND_HF ? "ultra" : "audible");
-        canvas_draw_str(canvas, PANEL_X, 32, "up/dn");
         hint(canvas, &I_Ok_btn_9x9, 9, "send", 52);
         hint(canvas, &I_back_10px, 10, "files", 63);
         break;
@@ -284,7 +281,6 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
             hint(canvas, &I_Ok_btn_9x9, 9, "resume", 52);
             hint(canvas, &I_back_10px, 10, "stop", 63);
         } else {
-            if(sstv_tx_band() == SSTV_BAND_HF) canvas_draw_str(canvas, PANEL_X, 52, "ultra");
             hint(canvas, &I_back_10px, 10, "pause", 63);
         }
         break;
@@ -1038,11 +1034,6 @@ static void run_viewport(SstvApp* app) {
                 break;
             }
             if(ev.input.type != InputTypeShort) break;
-            if(app->state == StatePreview && (ev.input.key == InputKeyUp || ev.input.key == InputKeyDown)) {
-                sstv_tx_set_band(sstv_tx_band() == SSTV_BAND_HF ? SSTV_BAND_AUDIBLE : SSTV_BAND_HF);
-                view_port_update(app->vp);
-                break;
-            }
             if(ev.input.key == InputKeyBack) {
                 if(app->state == StateTest) {
                     sstv_tx_stop();

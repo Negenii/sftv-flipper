@@ -921,6 +921,9 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         canvas_draw_str(canvas, 2, 24, t);
         snprintf(t, sizeof t, "build %d", SFTV_BUILD);
         canvas_draw_str(canvas, 2, 33, t);
+        /* authorship, bottom left: the font has no (c) sign, so it is a 7 px glyph */
+        canvas_draw_icon(canvas, 2, 55, &I_copyright_7x7);
+        canvas_draw_str(canvas, 12, 62, "2026 negenii");
         canvas_draw_icon(canvas, 74, 13, &I_qr_github);
         canvas_draw_str(canvas, 74 + (50 - (int)canvas_string_width(canvas, "github.com")) / 2, 9, "github.com"); /* caption over the code */
         furi_mutex_release(app->mutex);

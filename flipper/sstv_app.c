@@ -936,8 +936,7 @@ static void draw_callback(Canvas* canvas, void* ctx) {
             canvas_draw_str(canvas, 2, 24, t);
             snprintf(t, sizeof t, "build %d", SFTV_BUILD);
             canvas_draw_str(canvas, 2, 33, t);
-            canvas_draw_str(canvas, 2, 50, "github.com/");
-            canvas_draw_str(canvas, 2, 59, "Negenii");
+            canvas_draw_str(canvas, 2, 55, "github.com"); /* the QR code holds the full address */
             canvas_draw_icon(canvas, 71, 7, &I_qr_github);
         } else {
             canvas_set_font(canvas, FontPrimary);

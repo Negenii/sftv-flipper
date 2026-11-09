@@ -3,17 +3,22 @@ App(
     name="SFTV TX",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="sftv_app_main",
-    requires=["gui", "storage", "notification"],
-    stack_size=4 * 1024, # sstv_build_physical keeps ~1.5 kB of buffers on the stack
+    requires=["gui", "storage", "notification", "dialogs"],
+    stack_size=8 * 1024, # sstv_build_physical ~1.5 kB, the picture decoders a few kB more
     fap_category="Tools",
     fap_icon="icon_10px.png",
     fap_icon_assets="images",
-    fap_version="0.1",
-    fap_description="Flipper TV: send a 400x240 picture to a Playdate over sound",
+    fap_version="3.1",
+    fap_description="Flipper TV: send a picture (JPEG/PNG/BMP/PBM), a dolphin animation or a note to a Playdate over near-ultrasound",
     fap_private_libs=[
         Lib(
             name="common",
-            sources=["crc8.c", "rs.c", "sstv_codec.c", "sstv_frame.c", "sstv_preview.c", "pbm.c"],
+            sources=["crc8.c", "rs.c", "sstv_codec.c", "sstv_frame.c", "sstv_preview.c", "pbm.c", "sstv_anim.c"],
+        ),
+        Lib(
+            name="imgdec", # JPEG (TJpgDec, ChaN), PNG (uzlib, zlib licence), BMP/PBM -> 400x240 1-bit
+            sources=["imgload.c", "tjpgd.c", "tinflate.c", "tinfzlib.c", "adler32.c", "crc32.c"],
+            cflags=["-Wno-sign-compare"], # uzlib/TJpgDec as published
         ),
     ],
 )

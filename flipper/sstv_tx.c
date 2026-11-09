@@ -30,10 +30,15 @@ typedef enum {
 } TxPhase;
 
 typedef struct {
-    uint8_t* frames; /* physical frames, interleaved (SSTV_MAX_FRAMES capacity) */
+    uint8_t* frames; /* physical frames, interleaved (SSTV_MAX_FRAMES capacity); NULL: built per block from `blob` */
+    sstv_blob* blob; /* animation passes: built one block at a time (no room for the whole pass) */
+    uint8_t* blob_parity;
+    uint8_t blk[SSTV_ILEAVE * SSTV_FRAME_BYTES]; /* the block being sent */
+    int blk_index; /* which block is in blk, -1 none */
     uint8_t* lines_after; /* lines complete after each physical frame */
     uint16_t total; /* physical frames for this image */
     int data_frames; /* data positions of the pass (for the parity frame lookup), 0 unknown */
+    int intro; /* group-0 size of the pass (picture: sstv_pass_intro, note/animation: SSTV_NOTE_INTRO) */
     bool coded;
     volatile TxPhase phase;
     volatile uint16_t line; /* physical frame index */
@@ -46,8 +51,9 @@ typedef struct {
     bool loop; /* restart from frame 0 after the last one */
     bool test; /* tone test: symbols from test_pattern with test_tone_hz instead of frames */
     bool sweep; /* HF sweep (inside the test mode): one frequency step per frame */
+    bool calibrate; /* calibration: lock frames forever (receivers score them bit by bit) */
     int band; /* SSTV_BAND_AUDIBLE or SSTV_BAND_HF (near-ultrasound tones and sync) */
-    uint8_t sync_part; /* HF sync is sent as SYNC_PARTS back-to-back 4 ms pieces */
+    uint8_t sync_part; /* HF: pattern symbol being sent in the sync phase */
     int32_t hf_err_ticks; /* HF symbol timing accumulator (see hf_cycles) */
     /* pause/resume: a prebuilt control block (4 interleaved physical frames) is played
      * between data frames; then the sequencer either holds silent (pause) or continues. */
@@ -66,6 +72,18 @@ typedef struct {
 } SstvTx;
 
 static SstvTx tx = {0};
+/* Physical frame `line` of the pass. A block-built pass makes the block on its first symbol
+ * (4 frames: CRC + RS encode, ~0.2 ms, well inside a 3 ms symbol). */
+static const uint8_t* tx_frame(int line) {
+    if(tx.frames) return tx.frames + line * SSTV_FRAME_BYTES;
+    int b = line / SSTV_ILEAVE;
+    if(b != tx.blk_index) {
+        sstv_blob_block(tx.blob, b, tx.blk);
+        tx.blk_index = b;
+    }
+    return tx.blk + (line % SSTV_ILEAVE) * SSTV_FRAME_BYTES;
+}
+
 static int next_band = SSTV_BAND_HF; /* near-ultrasound only; the audible band is archived (git tag audible-mode-archive) */
 
 static const int tone_hz[SSTV_NUM_TONES] = SSTV_TONES_INIT;
@@ -89,11 +107,6 @@ static uint32_t hf_cycles(uint32_t arr) {
     tx.hf_err_ticks -= c * (int32_t)period;
     return (uint32_t)c;
 }
-/* The repetition counter is 8 bits: a 16 ms sync at 20.5 kHz is 328 cycles, so the HF sync goes
- * out as 4 back-to-back pieces of 4 ms (82 cycles each), one continuous burst on the air. HF data
- * symbols are 3 ms (SSTV_HF_SYMBOL_US). */
-#define SYNC_PIECE_US 4000
-#define SYNC_PARTS (SSTV_SYNC_US / SYNC_PIECE_US)
 
 static inline void tone_settings(int v, uint32_t* arr, uint32_t* cycles, uint32_t* duty_pct) {
     if(tx.band == SSTV_BAND_HF) {
@@ -166,9 +179,12 @@ static void tx_next_symbol(uint32_t* arr, uint32_t* cycles, uint32_t* duty_pct) 
         /* fall through */
     case PhaseSync:
         if(tx.band == SSTV_BAND_HF) {
-            *arr = ARR_FOR(SSTV_HF_FSYNC_HZ);
-            *cycles = CYCLES_FOR(SSTV_HF_FSYNC_HZ, SYNC_PIECE_US);
-            if(++tx.sync_part < SYNC_PARTS) return; /* more sync pieces follow */
+            /* pattern sync (revision 13): SSTV_HF_SYNC_SYMBOLS data-tone symbols in a fixed order;
+             * the LED still shows sync (queued = -1) */
+            static const uint8_t pat[SSTV_HF_SYNC_SYMBOLS] = SSTV_HF_SYNC_PATTERN_INIT;
+            tone_settings(pat[tx.sync_part], arr, cycles, duty_pct);
+            tx.queued = -1;
+            if(++tx.sync_part < SSTV_HF_SYNC_SYMBOLS) return; /* more pattern symbols follow */
             tx.sync_part = 0;
         } else {
             *arr = ARR_SYNC;
@@ -194,14 +210,14 @@ static void tx_next_symbol(uint32_t* arr, uint32_t* cycles, uint32_t* duty_pct) 
             tx.queued = sstv_frame_symbol_bits(tx.ctrl + tx.ctrl_line * SSTV_FRAME_BYTES, tx.symbol, SSTV_BAND_BITS(tx.band));
             tone_settings(tx.queued, arr, cycles, duty_pct);
         } else {
-            tx.queued = sstv_frame_symbol_bits(tx.frames + tx.line * SSTV_FRAME_BYTES, tx.symbol, SSTV_BAND_BITS(tx.band));
+            tx.queued = sstv_frame_symbol_bits(tx_frame(tx.line), tx.symbol, SSTV_BAND_BITS(tx.band));
             tone_settings(tx.queued, arr, cycles, duty_pct);
         }
         tx.symbol++;
         if(tx.symbol >= (tx.test ? SSTV_SYMBOLS_PER_FRAME : SSTV_BAND_SYMBOLS_PER_FRAME(tx.band))) {
             if(tx.lock_left > 0) {
-                /* a preamble lock frame just finished; not part of the pass */
-                tx.lock_left--;
+                /* a preamble lock frame just finished; not part of the pass (calibration: endless) */
+                if(!tx.calibrate) tx.lock_left--;
                 tx.phase = PhaseSync;
                 return;
             }
@@ -305,6 +321,7 @@ static bool tx_run(bool leader, SstvTxCallback cb, void* ctx) {
     tx.ladder = leader;
     tx.sync_part = 0;
     tx.lock_left = leader ? SSTV_LOCK_FRAMES : 0; /* start preamble: ladder, then lock frames */
+    if(tx.calibrate) tx.lock_left = 1; /* never counts down */
     sstv_lock_frame(tx.lock);
     tx.ctrl_line = -1;
     tx.ctrl_is_pause = false;
@@ -353,8 +370,15 @@ static bool tx_run(bool leader, SstvTxCallback cb, void* ctx) {
     return true;
 }
 
+/* Room for a prebuilt pass (malloc does not fail on the Flipper, it crashes the app). */
+static bool room_for_pass(void) {
+    return memmgr_heap_get_max_free_block() >= (size_t)SSTV_MAX_FRAMES * SSTV_FRAME_BYTES + 2048 &&
+           memmgr_get_free_heap() >= (size_t)SSTV_MAX_FRAMES * (SSTV_FRAME_BYTES + 1) + 4096;
+}
+
 bool sstv_tx_start(const uint8_t* image_bits, const char* name, bool loop, SstvTxCallback cb, void* ctx) {
     if(tx.running) return false;
+    if(!room_for_pass()) return false;
     if(!furi_hal_speaker_acquire(1000)) return false;
     tx.frames = malloc(SSTV_MAX_FRAMES * SSTV_FRAME_BYTES);
     tx.lines_after = malloc(SSTV_MAX_FRAMES);
@@ -366,23 +390,56 @@ bool sstv_tx_start(const uint8_t* image_bits, const char* name, bool loop, SstvT
             break;
         }
     }
+    tx.intro = sstv_pass_intro(tx.coded);
     tx.loop = loop;
     tx.test = false;
     tx.sweep = false;
+    tx.calibrate = false;
     return tx_run(true, cb, ctx);
 }
 
 bool sstv_tx_start_note(const char* text, const char* name, SstvTxCallback cb, void* ctx) {
     if(tx.running) return false;
+    if(!room_for_pass()) return false;
     if(!furi_hal_speaker_acquire(1000)) return false;
     tx.frames = malloc(SSTV_MAX_FRAMES * SSTV_FRAME_BYTES);
     tx.lines_after = malloc(SSTV_MAX_FRAMES);
     tx.total = (uint16_t)sstv_build_note(text, name, tx.frames, tx.lines_after);
-    tx.data_frames = 0; /* note LED just follows the tones; no parity distinction needed */
+    tx.data_frames = 0; /* note layout: for the green parity LED */
+    for(int d = SSTV_ILEAVE; d <= SSTV_MAX_DATA_FRAMES; d += SSTV_ILEAVE) {
+        if(sstv_pass_total(d, SSTV_NOTE_INTRO(d)) == tx.total) {
+            tx.data_frames = d;
+            tx.intro = SSTV_NOTE_INTRO(d);
+            break;
+        }
+    }
     tx.coded = false;
     tx.loop = false;
     tx.test = false;
     tx.sweep = false;
+    tx.calibrate = false;
+    return tx_run(true, cb, ctx);
+}
+
+bool sstv_tx_start_anim(const uint8_t* stream, int len, const char* name, SstvTxCallback cb, void* ctx) {
+    if(tx.running) return false;
+    size_t pb = (size_t)sstv_blob_parity_bytes(len);
+    if(memmgr_heap_get_max_free_block() < pb + sizeof(sstv_blob) + 2048) return false; /* malloc would crash */
+    if(!furi_hal_speaker_acquire(1000)) return false;
+    tx.blob = malloc(sizeof(sstv_blob));
+    tx.blob_parity = malloc(pb);
+    sstv_blob_init(tx.blob, stream, len, true, name, tx.blob_parity);
+    tx.blk_index = -1;
+    tx.frames = NULL;
+    tx.lines_after = NULL;
+    tx.total = (uint16_t)tx.blob->total;
+    tx.data_frames = tx.blob->data_frames; /* for the green parity LED */
+    tx.intro = tx.blob->intro;
+    tx.coded = false;
+    tx.loop = false;
+    tx.test = false;
+    tx.sweep = false;
+    tx.calibrate = false;
     return tx_run(true, cb, ctx);
 }
 
@@ -396,7 +453,22 @@ bool sstv_tx_start_test(SstvTxCallback cb, void* ctx) {
     tx.coded = false;
     tx.test = true;
     tx.sweep = false;
+    tx.calibrate = false;
     test_pattern_fill(tx.test_pattern);
+    return tx_run(false, cb, ctx);
+}
+
+bool sstv_tx_start_calibrate(SstvTxCallback cb, void* ctx) {
+    if(tx.running) return false;
+    if(!furi_hal_speaker_acquire(1000)) return false;
+    tx.frames = NULL;
+    tx.lines_after = NULL;
+    tx.total = 0xFFFF;
+    tx.loop = true;
+    tx.coded = false;
+    tx.test = false;
+    tx.sweep = false;
+    tx.calibrate = true;
     return tx_run(false, cb, ctx);
 }
 
@@ -420,6 +492,10 @@ void sstv_tx_stop(void) {
     tx.frames = NULL;
     free(tx.lines_after);
     tx.lines_after = NULL;
+    free(tx.blob);
+    tx.blob = NULL;
+    free(tx.blob_parity);
+    tx.blob_parity = NULL;
     tx.running = false;
 }
 
@@ -477,7 +553,7 @@ int sstv_tx_current_symbol(void) {
 
 bool sstv_tx_current_is_parity(void) {
     if(!tx.running || tx.test || tx.data_frames == 0) return false;
-    return sstv_pass_frame_kind(tx.line, tx.data_frames, sstv_pass_intro(tx.coded)) == SSTV_PASS_PARITY;
+    return sstv_pass_frame_kind(tx.line, tx.data_frames, tx.intro) == SSTV_PASS_PARITY;
 }
 
 void sstv_tx_set_band(int band) {

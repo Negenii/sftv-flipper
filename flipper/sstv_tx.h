@@ -14,6 +14,10 @@ bool sstv_tx_start(const uint8_t* image_bits, const char* name, bool loop, SstvT
 /* Transmit an ASCII text note (see sstv_build_note). Same framing/modem as an image. */
 bool sstv_tx_start_note(const char* text, const char* name, SstvTxCallback cb, void* ctx);
 
+/* Transmit an animation stream (sstv_anim.h) as an animation pass. Frame buffers are sized to
+ * the stream; false when the speaker is busy or memory is short. */
+bool sstv_tx_start_anim(const uint8_t* stream, int len, const char* name, SstvTxCallback cb, void* ctx);
+
 /* Temporary tone test (channel measurements): sync burst + 164 symbols cycling through six
  * values (silence, 2500, 3000, 3500, 4000, 4500 Hz) in a fixed pseudo-random order
  * (SSTV_TEST_* below), repeated until sstv_tx_stop(). The callback fires per frame with
@@ -22,6 +26,8 @@ bool sstv_tx_start_note(const char* text, const char* name, SstvTxCallback cb, v
 bool sstv_tx_start_test(SstvTxCallback cb, void* ctx);
 /* HF sweep: 3 kHz reference + 12..21 kHz in 500 Hz steps, one per frame, looping. */
 bool sstv_tx_start_sweep(SstvTxCallback cb, void* ctx);
+/* Calibration: the preamble's lock frames on the HF band, forever (receivers score each one). */
+bool sstv_tx_start_calibrate(SstvTxCallback cb, void* ctx);
 /* Band for the next picture/note: SSTV_BAND_AUDIBLE (3-4 kHz) or SSTV_BAND_HF (18-21 kHz). */
 void sstv_tx_set_band(int band);
 int sstv_tx_band(void);

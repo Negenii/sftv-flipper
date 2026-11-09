@@ -969,7 +969,7 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str(canvas, 2, 11, "Like it?");
         canvas_set_font(canvas, FontSecondary); /* the column is 62 px: three short lines */
-        canvas_draw_str(canvas, 2, 21, "Support");
+        canvas_draw_str(canvas, 2, 21, "Support me");
         canvas_draw_str(canvas, 2, 30, "making fun");
         canvas_draw_str(canvas, 2, 39, "little things.");
         canvas_draw_rbox(canvas, 0, 43, 62, 21, 3);

@@ -6,6 +6,8 @@ SFTV TX sends pictures, notes and animations to the receiver
 ([SFTV RX](https://github.com/Negenii/sftv-playdate) on a Playdate) as near-ultrasound
 (17–21 kHz). No pairing, no radio: the receiver just listens.
 
+No Playdate? [SFTV Web](https://negenii.github.io/sftv-web/) receives in a browser.
+
 ## Installing
 
 Download `sftv_tx.fap` (or build it, see below) and copy it to `apps/Tools/` on the Flipper's

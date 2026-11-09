@@ -33,6 +33,8 @@
 #define NOTES_PATH SSTV_DATA_DIR "/notes.txt"
 #define SSTV_OLD_DATA_DIR EXT_PATH("apps_data/sstv_tx") /* before the rename to SFTV */
 #define SSTV_FILE_MAX (SSTV_IMAGE_BYTES + 256)
+#define TOAST_MS 2500 /* the "Deleted" notice over the grid */
+#define TOAST_FRAME_MS 90 /* its trash-can animation, played once */
 #define MAX_FILES 160 /* names only; tiles are made for the page on screen */
 #define TILES_PER_PAGE 3
 
@@ -57,6 +59,7 @@ typedef enum {
     EvFrame,
     EvTxDone,
     EvAnimTick, /* next animation frame (timer) */
+    EvToastTick, /* next frame of the "Deleted" notice (timer) */
 } EventType;
 
 typedef struct {
@@ -114,6 +117,9 @@ typedef struct {
     int editing_user_idx; /* user-note index behind the current preview/edit, -1 = new or preset */
     bool note_del_confirm; /* preview: confirming deletion of a saved note */
     bool pic_del_confirm; /* picture preview: confirming deletion of the .pbm */
+    char toast[40]; /* grid notice ("Deleted <name>") shown until toast_until */
+    uint32_t toast_until;
+    FuriTimer* toast_timer; /* one-shot redraw when the notice expires */
     /* whole animation (StateAnim, and Transmit/Done with is_anim) */
     bool is_anim;
     bool conv_anim; /* StateConvert is packing an animation */
@@ -455,6 +461,34 @@ static void draw_browse(Canvas* canvas, SstvApp* app) {
     canvas_draw_str(canvas, 56, 62, "exit");
     snprintf(buf, sizeof buf, "%d/%d", app->browse_sel + 1, total);
     canvas_draw_str(canvas, 126 - canvas_string_width(canvas, buf), 62, buf);
+    uint32_t now = furi_get_tick();
+    if(app->toast[0] && now < app->toast_until) {
+        /* trash can (tools/make_trash_icon.py): lid opens, the sheet drops in, lid shuts;
+         * played once, then it stays on the last (closed) frame */
+        static const Icon* const trash[] = {&I_trash_0, &I_trash_1, &I_trash_2, &I_trash_3, &I_trash_4, &I_trash_5,
+                                            &I_trash_6, &I_trash_7, &I_trash_8, &I_trash_9, &I_trash_10};
+        const int nf = (int)COUNT_OF(trash);
+        uint32_t t = now - (app->toast_until - furi_ms_to_ticks(TOAST_MS));
+        int f = (int)(t / furi_ms_to_ticks(TOAST_FRAME_MS));
+        if(f >= nf) f = nf - 1;
+        int bw = 112, bx = (128 - bw) / 2, by = 16, bh = 30;
+        canvas_set_color(canvas, ColorWhite);
+        canvas_draw_box(canvas, bx, by, bw, bh);
+        canvas_set_color(canvas, ColorBlack);
+        canvas_draw_rframe(canvas, bx, by, bw, bh, 3);
+        canvas_draw_icon(canvas, bx + 4, by + 3, trash[f]);
+        int tx = bx + 31, tw = bx + bw - 4 - tx;
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, tx, by + 13, "Deleted");
+        canvas_set_font(canvas, FontSecondary);
+        fit_name(canvas, buf, sizeof buf, app->toast, tw);
+        canvas_draw_str(canvas, tx, by + 24, buf);
+    }
+}
+
+static void toast_timer_cb(void* ctx) {
+    AppEvent ev = {.type = EvToastTick};
+    furi_message_queue_put(((SstvApp*)ctx)->queue, &ev, 0);
 }
 
 /* ---- Cyrillic/UTF-8 note text via the built-in u8g2 UTF-8 path ---- */
@@ -2065,6 +2099,13 @@ static void run_viewport(SstvApp* app) {
         case EvAnimTick:
             anim_tick(app);
             break;
+        case EvToastTick: /* redraw the notice; once it is over, one last redraw clears it */
+            if(furi_get_tick() >= app->toast_until) {
+                furi_timer_stop(app->toast_timer);
+                app->toast[0] = 0;
+            }
+            view_port_update(app->vp);
+            break;
         case EvTxDone:
             sstv_tx_stop();
             set_state(app, StateDone);
@@ -2250,8 +2291,19 @@ static void run_viewport(SstvApp* app) {
                     /* the picture's .pbm in the data folder (presets came from tools/make_*.py,
                      * SD imports from convert_still: all plain files, nothing built in) */
                     FuriString* dp = furi_string_alloc_printf("%s/%s", SSTV_DATA_DIR, app->files[app->file_index]);
-                    storage_simply_remove(app->storage, furi_string_get_cstr(dp));
+                    bool gone = storage_simply_remove(app->storage, furi_string_get_cstr(dp));
                     furi_string_free(dp);
+                    if(gone) {
+                        /* name without .pbm; the notice stays TOAST_MS over the grid */
+                        strncpy(app->toast, app->files[app->file_index], sizeof app->toast - 1);
+                        char* dot = strrchr(app->toast, '.');
+                        if(dot) *dot = 0;
+                        app->toast_until = furi_get_tick() + furi_ms_to_ticks(TOAST_MS);
+                        furi_timer_start(app->toast_timer, furi_ms_to_ticks(TOAST_FRAME_MS));
+                        notification_message(app->notif, &sequence_blink_green_100);
+                    } else {
+                        notification_message(app->notif, &sequence_error);
+                    }
                     app->pic_del_confirm = false;
                     int sel = app->browse_sel;
                     scan_files(app);
@@ -2366,6 +2418,7 @@ int32_t sftv_app_main(void* p) {
     icon_animation_set_update_callback(app->opts_anim, scan_anim_cb, app);
     app->menu_anim = -1;
     app->anim_timer = furi_timer_alloc(anim_timer_cb, FuriTimerTypePeriodic, app);
+    app->toast_timer = furi_timer_alloc(toast_timer_cb, FuriTimerTypePeriodic, app);
 
     app->storage = furi_record_open(RECORD_STORAGE);
     /* the app used to be called SSTV: carry the pictures over */
@@ -2380,6 +2433,8 @@ int32_t sftv_app_main(void* p) {
     run_viewport(app);
     anim_close(app);
     furi_timer_free(app->anim_timer);
+    furi_timer_stop(app->toast_timer);
+    furi_timer_free(app->toast_timer); /* before the view port it redraws goes away */
 
     furi_record_close(RECORD_STORAGE);
     icon_animation_stop(app->scan_anim);

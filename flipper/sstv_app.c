@@ -113,6 +113,7 @@ typedef struct {
     int user_note_count;
     int editing_user_idx; /* user-note index behind the current preview/edit, -1 = new or preset */
     bool note_del_confirm; /* preview: confirming deletion of a saved note */
+    bool pic_del_confirm; /* picture preview: confirming deletion of the .pbm */
     /* whole animation (StateAnim, and Transmit/Done with is_anim) */
     bool is_anim;
     bool conv_anim; /* StateConvert is packing an animation */
@@ -280,6 +281,21 @@ static void draw_spinner(Canvas* canvas, int cx, int cy) {
     canvas_draw_dot(canvas, cx + dx[k], cy + dy[k]);
 }
 
+/* Deletion prompt: a title and two button rows (OK delete, Back cancel), vertically centred. */
+static void confirm_box(Canvas* canvas, int bx, int bw, const char* title) {
+    const int by = 11, bh = 37;
+    canvas_set_font(canvas, FontSecondary);
+    canvas_set_color(canvas, ColorWhite);
+    canvas_draw_box(canvas, bx, by, bw, bh);
+    canvas_set_color(canvas, ColorBlack);
+    canvas_draw_frame(canvas, bx, by, bw, bh);
+    canvas_draw_str(canvas, bx + 5, by + 11, title);
+    canvas_draw_icon(canvas, bx + 5, by + 14, &I_Ok_btn_9x9);
+    canvas_draw_str(canvas, bx + 18, by + 22, "delete");
+    canvas_draw_icon(canvas, bx + 5, by + 25, &I_back_10px);
+    canvas_draw_str(canvas, bx + 18, by + 33, "cancel");
+}
+
 /* Button hint: icon plus a word, baseline at `y`. */
 static void hint(Canvas* canvas, const Icon* icon, int icon_h, const char* text, int y) {
     canvas_draw_icon(canvas, PANEL_X, y - icon_h + 1, icon);
@@ -305,8 +321,14 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
         break;
     case StatePreview:
         canvas_draw_str(canvas, PANEL_X, 9, "Ready");
+        /* the 4 px arrow sits in the middle of the 9-10 px icon column */
+        canvas_draw_icon(canvas, PANEL_X + 3, 41 - 7 + 1, &I_ButtonLeft_4x7);
+        canvas_draw_str(canvas, PANEL_X + 13, 41, "delete");
         hint(canvas, &I_Ok_btn_9x9, 9, "send", 52);
         hint(canvas, &I_back_10px, 10, "files", 63);
+        if(app->pic_del_confirm) {
+            confirm_box(canvas, 3, PANEL_X - 9, "Delete picture?"); /* over the picture only */
+        }
         break;
     case StateTransmit: {
         bool paused = sstv_tx_is_paused();
@@ -708,13 +730,7 @@ static void draw_note_preview(Canvas* canvas, SstvApp* app) {
     if(app->editing_user_idx >= 0) canvas_draw_str(canvas, 72, 62, "<del");
     canvas_draw_icon(canvas, 116, 53, &I_back_10px);
     if(app->note_del_confirm) {
-        int bw = 96, bx = (128 - bw) / 2, by = 20, bh = 24;
-        canvas_set_color(canvas, ColorWhite);
-        canvas_draw_box(canvas, bx, by, bw, bh);
-        canvas_set_color(canvas, ColorBlack);
-        canvas_draw_frame(canvas, bx, by, bw, bh);
-        canvas_draw_str(canvas, bx + 6, by + 10, "Delete note?");
-        canvas_draw_str(canvas, bx + 6, by + 20, "OK yes   Back no");
+        confirm_box(canvas, 24, 80, "Delete note?");
     }
 }
 
@@ -2222,6 +2238,28 @@ static void run_viewport(SstvApp* app) {
                         app->editing_user_idx = -1;
                         set_state(app, StateNotePreview);
                     }
+                }
+                view_port_update(app->vp);
+                break;
+            }
+            if(app->state == StatePreview && (app->pic_del_confirm || ev.input.key == InputKeyLeft)) {
+                if(ev.input.type != InputTypeShort) break;
+                if(!app->pic_del_confirm) {
+                    app->pic_del_confirm = true; /* Left: ask first */
+                } else if(ev.input.key == InputKeyOk) {
+                    /* the picture's .pbm in the data folder (presets came from tools/make_*.py,
+                     * SD imports from convert_still: all plain files, nothing built in) */
+                    FuriString* dp = furi_string_alloc_printf("%s/%s", SSTV_DATA_DIR, app->files[app->file_index]);
+                    storage_simply_remove(app->storage, furi_string_get_cstr(dp));
+                    furi_string_free(dp);
+                    app->pic_del_confirm = false;
+                    int sel = app->browse_sel;
+                    scan_files(app);
+                    app->browse_sel = sel > app->file_count ? app->file_count : sel; /* the next one slides in */
+                    ensure_thumbs(app);
+                    set_state(app, StateBrowse);
+                } else if(ev.input.key == InputKeyBack) {
+                    app->pic_del_confirm = false;
                 }
                 view_port_update(app->vp);
                 break;

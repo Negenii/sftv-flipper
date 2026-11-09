@@ -103,8 +103,6 @@ typedef struct {
     int opt_index; /* Options list cursor */
     bool al_sent; /* the animation on screen in the list was sent before (it has a shortcut) */
     char last_txt_dir[128]; /* folder of the last .txt picked for a note */
-    int about_scroll; /* About: first line shown */
-    int about_lines; /* About: lines after wrapping (set when drawn) */
     int note_index; /* note list cursor: 0 = New note, 1.. = presets */
     bool is_note; /* the current transmission is a text note */
     bool pausing; /* Back pressed: PAUSE block is being sent, not yet holding */
@@ -504,17 +502,8 @@ static void note_draw_wrapped(Canvas* canvas, const char* text, int x0, int y0, 
 /* ---- top menu ---- */
 /* ---- Options and About ---- */
 #define OPT_COUNT 2 /* Calibrate, About (the HF sweep and the audible tone test were developer tools) */
-static const char about_text[] =
-    "SFTV TX sends pictures, notes and Flipper animations as near-ultrasound (17-21 kHz) "
-    "to a Playdate running SFTV RX, or to the web receiver.\n"
-    "Keep the speaker 5-15 cm from the receiver's microphone. Options > Calibrate shows "
-    "the quality there: aim for 80% or more.\n"
-    "While sending: Back pauses, OK goes on, Back again stops.\n"
-    "Image: a saved picture, or any JPEG, PNG or BMP from the SD card. Animation: Left and "
-    "Right browse, Up and Down jump by ten.\n"
-    "JPEG decoding: TJpgDec by ChaN. PNG: uzlib (zlib licence).";
-#define ABOUT_VISIBLE 5
-#define ABOUT_CARD_LINES 6 /* the card with the 50 px QR code, in 9 px text lines */
+/* About is one card: name, version, build and a QR code to the project page (the how-to text
+ * lives on GitHub). */
 
 /* Draws `text` word-wrapped to `w` px from baseline y (line height lh), skipping the first
  * `skip` lines and drawing at most `max` (0: measure only). '\n' starts a new paragraph after
@@ -921,38 +910,20 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     }
     if(app->state == StateAbout) {
         canvas_set_font(canvas, FontSecondary);
-        /* about_scroll 0 is the card, the whole screen: name, version, build and the project address
-         * on the left, the QR code to it on the right (a scanner needs white around it: a code touching
-         * the bezel did not decode). Further
-         * down, the title and the text a line at a time. */
-        int tl = draw_wrapped(canvas, about_text, 0, 0, 119, 9, 0, 0); /* measure */
-        app->about_lines = 1 + tl;
-        if(app->about_scroll == 0) {
-            char t[24];
-            canvas_set_font(canvas, FontPrimary);
-            canvas_draw_str(canvas, 2, 12, "SFTV TX");
-            canvas_set_font(canvas, FontSecondary);
-            snprintf(t, sizeof t, "version %s", SFTV_VERSION);
-            canvas_draw_str(canvas, 2, 24, t);
-            snprintf(t, sizeof t, "build %d", SFTV_BUILD);
-            canvas_draw_str(canvas, 2, 33, t);
-            /* "github.com" on the bottom line, an arrow from it to the code (which holds the full
-             * address), centred on the letters like the bottom-bar glyphs */
-            canvas_draw_str(canvas, 2, 62, "github.com");
-            canvas_draw_icon(canvas, 2 + (int)canvas_string_width(canvas, "github.com") + 4, 55, &I_arrow_right_10x7);
-            canvas_draw_icon(canvas, 71, 13, &I_qr_github); /* along the scroll bar; 1 px of white below still decodes, flush with the edge does not */
-        } else {
-            canvas_set_font(canvas, FontPrimary);
-            canvas_draw_str(canvas, 2, 10, "About");
-            canvas_set_font(canvas, FontSecondary);
-            draw_wrapped(canvas, about_text, 2, 21, 119, 9, app->about_scroll - 1, ABOUT_VISIBLE);
-        }
-        /* scroll bar on the right: positions 0 (the card) .. maxs */
-        int maxs = app->about_lines - ABOUT_VISIBLE;
-        if(maxs < 1) maxs = 1;
-        int bar_h = 50 * ABOUT_VISIBLE / (maxs + ABOUT_VISIBLE), top = 13 + (50 - bar_h) * app->about_scroll / maxs;
-        canvas_draw_line(canvas, 126, 13, 126, 63);
-        canvas_draw_box(canvas, 125, top, 3, bar_h);
+        /* the whole screen: name, version and build on the left, "github.com" on the bottom line
+         * with an arrow to the QR code on the right (a scanner needs white around it: a code touching
+         * the bezel did not decode, 4 px on the right and 1 px below do) */
+        char t[24];
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 2, 12, "SFTV TX");
+        canvas_set_font(canvas, FontSecondary);
+        snprintf(t, sizeof t, "version %s", SFTV_VERSION);
+        canvas_draw_str(canvas, 2, 24, t);
+        snprintf(t, sizeof t, "build %d", SFTV_BUILD);
+        canvas_draw_str(canvas, 2, 33, t);
+        canvas_draw_str(canvas, 2, 62, "github.com");
+        canvas_draw_icon(canvas, 2 + (int)canvas_string_width(canvas, "github.com") + 4, 55, &I_arrow_right_10x7);
+        canvas_draw_icon(canvas, 74, 13, &I_qr_github);
         furi_mutex_release(app->mutex);
         return;
     }
@@ -2099,18 +2070,12 @@ static void run_viewport(SstvApp* app) {
                 if(ev.input.type == InputTypeShort && ev.input.key == InputKeyBack) set_state(app, StateMenu);
                 if(ev.input.type == InputTypeShort && ev.input.key == InputKeyOk) {
                     if(app->opt_index == 0) start_calibrate(app);
-                    else {
-                        app->about_scroll = 0;
-                        set_state(app, StateAbout);
-                    }
+                    else set_state(app, StateAbout);
                 }
                 view_port_update(app->vp);
                 break;
             }
             if(app->state == StateAbout) {
-                int max = app->about_lines - ABOUT_VISIBLE; /* 0 = the card, then the text a line at a time */
-                if(ev.input.key == InputKeyDown && app->about_scroll < max) app->about_scroll++;
-                if(ev.input.key == InputKeyUp && app->about_scroll > 0) app->about_scroll--;
                 if(ev.input.type == InputTypeShort && ev.input.key == InputKeyBack) set_state(app, StateOptions);
                 view_port_update(app->vp);
                 break;

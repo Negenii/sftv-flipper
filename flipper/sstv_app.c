@@ -471,18 +471,21 @@ static void draw_browse(Canvas* canvas, SstvApp* app) {
         uint32_t t = now - (app->toast_until - furi_ms_to_ticks(TOAST_MS));
         int f = (int)(t / furi_ms_to_ticks(TOAST_FRAME_MS));
         if(f >= nf) f = nf - 1;
-        int bw = 112, bx = (128 - bw) / 2, by = 16, bh = 30;
+        /* The frame's top 8 rows are room for the open lid and the falling sheet; the closed
+         * can fills rows 8..23, so at by+2 it spans by+10..by+25; the two text lines span
+         * by+9 (cap top) .. by+27 (last row): both centred on by+18. */
+        int bw = 112, bx = (128 - bw) / 2, by = 12, bh = 36;
         canvas_set_color(canvas, ColorWhite);
         canvas_draw_box(canvas, bx, by, bw, bh);
         canvas_set_color(canvas, ColorBlack);
         canvas_draw_rframe(canvas, bx, by, bw, bh, 3);
-        canvas_draw_icon(canvas, bx + 4, by + 3, trash[f]);
+        canvas_draw_icon(canvas, bx + 4, by + 2, trash[f]);
         int tx = bx + 31, tw = bx + bw - 4 - tx;
         canvas_set_font(canvas, FontPrimary);
-        canvas_draw_str(canvas, tx, by + 13, "Deleted");
+        canvas_draw_str(canvas, tx, by + 17, "Deleted");
         canvas_set_font(canvas, FontSecondary);
         fit_name(canvas, buf, sizeof buf, app->toast, tw);
-        canvas_draw_str(canvas, tx, by + 24, buf);
+        canvas_draw_str(canvas, tx, by + 28, buf);
     }
 }
 

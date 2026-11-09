@@ -910,9 +910,9 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     }
     if(app->state == StateAbout) {
         canvas_set_font(canvas, FontSecondary);
-        /* the whole screen: name, version and build on the left, "github.com" on the bottom line
-         * with an arrow to the QR code on the right (a scanner needs white around it: a code touching
-         * the bezel did not decode, 4 px on the right and 1 px below do) */
+        /* the whole screen: name, version and build on the left, the QR code on the right with
+         * "github.com" over it (a scanner needs white around the code: one touching the bezel did not
+         * decode, 4 px on the right, 1 px below and the caption 4 px above do) */
         char t[24];
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str(canvas, 2, 12, "SFTV TX");
@@ -921,9 +921,8 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         canvas_draw_str(canvas, 2, 24, t);
         snprintf(t, sizeof t, "build %d", SFTV_BUILD);
         canvas_draw_str(canvas, 2, 33, t);
-        canvas_draw_str(canvas, 2, 62, "github.com");
-        canvas_draw_icon(canvas, 2 + (int)canvas_string_width(canvas, "github.com") + 4, 55, &I_arrow_right_10x7);
         canvas_draw_icon(canvas, 74, 13, &I_qr_github);
+        canvas_draw_str(canvas, 74 + (50 - (int)canvas_string_width(canvas, "github.com")) / 2, 9, "github.com"); /* caption over the code */
         furi_mutex_release(app->mutex);
         return;
     }

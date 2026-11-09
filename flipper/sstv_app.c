@@ -936,7 +936,10 @@ static void draw_callback(Canvas* canvas, void* ctx) {
             canvas_draw_str(canvas, 2, 24, t);
             snprintf(t, sizeof t, "build %d", SFTV_BUILD);
             canvas_draw_str(canvas, 2, 33, t);
-            canvas_draw_str(canvas, 2, 55, "github.com"); /* the QR code holds the full address */
+            /* "github.com" on the bottom line, an arrow from it to the code (which holds the full
+             * address), centred on the letters like the bottom-bar glyphs */
+            canvas_draw_str(canvas, 2, 62, "github.com");
+            canvas_draw_icon(canvas, 2 + (int)canvas_string_width(canvas, "github.com") + 4, 55, &I_arrow_right_10x7);
             canvas_draw_icon(canvas, 71, 13, &I_qr_github); /* along the scroll bar; 1 px of white below still decodes, flush with the edge does not */
         } else {
             canvas_set_font(canvas, FontPrimary);

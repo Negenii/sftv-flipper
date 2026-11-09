@@ -503,7 +503,7 @@ static void note_draw_wrapped(Canvas* canvas, const char* text, int x0, int y0, 
 
 /* ---- top menu ---- */
 /* ---- Options and About ---- */
-#define OPT_COUNT 4
+#define OPT_COUNT 2 /* Calibrate, About (the HF sweep and the audible tone test were developer tools) */
 static const char about_text[] =
     "SFTV TX sends pictures, notes and Flipper animations as near-ultrasound (17-21 kHz) "
     "to a Playdate running SFTV RX, or to the web receiver.\n"
@@ -903,7 +903,7 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         return;
     }
     if(app->state == StateOptions) {
-        static const char* items[OPT_COUNT] = {"Calibrate", "HF sweep", "Tone test (audible)", "About"};
+        static const char* items[OPT_COUNT] = {"Calibrate", "About"};
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str(canvas, 2, 10, "Options");
         canvas_set_font(canvas, FontSecondary);
@@ -922,8 +922,8 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     if(app->state == StateAbout) {
         canvas_set_font(canvas, FontSecondary);
         /* about_scroll 0 is the card, the whole screen: name, version, build and the project address
-         * on the left, the QR code to it on the right, centred with 7 px of white above and below (a
-         * scanner needs that quiet zone: a 63 px code touching the bezel did not decode). Further
+         * on the left, the QR code to it on the right (a scanner needs white around it: a code touching
+         * the bezel did not decode). Further
          * down, the title and the text a line at a time. */
         int tl = draw_wrapped(canvas, about_text, 0, 0, 119, 9, 0, 0); /* measure */
         app->about_lines = 1 + tl;
@@ -937,7 +937,7 @@ static void draw_callback(Canvas* canvas, void* ctx) {
             snprintf(t, sizeof t, "build %d", SFTV_BUILD);
             canvas_draw_str(canvas, 2, 33, t);
             canvas_draw_str(canvas, 2, 55, "github.com"); /* the QR code holds the full address */
-            canvas_draw_icon(canvas, 71, 7, &I_qr_github);
+            canvas_draw_icon(canvas, 71, 13, &I_qr_github); /* along the scroll bar; 1 px of white below still decodes, flush with the edge does not */
         } else {
             canvas_set_font(canvas, FontPrimary);
             canvas_draw_str(canvas, 2, 10, "About");
@@ -1062,28 +1062,6 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         draw_wrapped(canvas, "Move the Flipper around the receiver's mic until its screen shows quality 80% or more.", 2, 33, 124, 9, 0, 3);
         canvas_draw_icon(canvas, 2, 55, &I_back_10px);
         canvas_draw_str(canvas, 14, 63, "stop");
-        furi_mutex_release(app->mutex);
-        return;
-    }
-    if(app->state == StateTest && app->sweep) {
-        canvas_set_font(canvas, FontPrimary);
-        canvas_draw_str(canvas, 2, 12, "HF sweep");
-        canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 2, 26, "3 kHz ref, then 12-21 kHz");
-        canvas_draw_str(canvas, 2, 36, "500 Hz steps, 0.4 s each");
-        canvas_draw_str(canvas, 2, 46, "13.4 s cycle, looping");
-        hint(canvas, &I_back_10px, 10, "stop", 63);
-        furi_mutex_release(app->mutex);
-        return;
-    }
-    if(app->state == StateTest) {
-        canvas_set_font(canvas, FontPrimary);
-        canvas_draw_str(canvas, 2, 12, "Tone test");
-        canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 2, 26, "sync + 164 x 4 ms symbols:");
-        canvas_draw_str(canvas, 2, 36, "silence 2500 3000 3500");
-        canvas_draw_str(canvas, 2, 46, "4000 4500 Hz, looping");
-        hint(canvas, &I_back_10px, 10, "stop", 63);
         furi_mutex_release(app->mutex);
         return;
     }
@@ -2076,16 +2054,6 @@ static void start_calibrate(SstvApp* app) {
     }
 }
 
-static void start_test(SstvApp* app, bool sweep) {
-    app->calib = false;
-    app->sweep = sweep;
-    if(sweep ? sstv_tx_start_sweep(tx_callback, app) : sstv_tx_start_test(tx_callback, app)) {
-        set_state(app, StateTest);
-    } else {
-        FURI_LOG_E(TAG, "speaker busy");
-    }
-}
-
 static void run_viewport(SstvApp* app) {
     set_state(app, StateMenu);
     gui_add_view_port(app->gui, app->vp, GuiLayerFullscreen);
@@ -2128,8 +2096,6 @@ static void run_viewport(SstvApp* app) {
                 if(ev.input.type == InputTypeShort && ev.input.key == InputKeyBack) set_state(app, StateMenu);
                 if(ev.input.type == InputTypeShort && ev.input.key == InputKeyOk) {
                     if(app->opt_index == 0) start_calibrate(app);
-                    else if(app->opt_index == 1) start_test(app, true); /* HF sweep */
-                    else if(app->opt_index == 2) start_test(app, false); /* tone test */
                     else {
                         app->about_scroll = 0;
                         set_state(app, StateAbout);

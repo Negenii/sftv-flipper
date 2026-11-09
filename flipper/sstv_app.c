@@ -1203,6 +1203,36 @@ static void anim_thumb(Storage* storage, const char* dir, uint8_t* tile) {
     if(!ok) memset(tile, 0x55, SSTV_TINY_BYTES);
 }
 
+/* Preset pictures ship inside the FAP (application.fam fap_file_assets: flipper/files/pictures,
+ * unpacked by the firmware to /ext/apps_assets/sftv_tx). On the first launch they are copied
+ * into the picture folder, where they are ordinary pictures: the user can send or delete them.
+ * The marker keeps deleted presets from coming back; a new set gets a new marker name. */
+#define PRESETS_DIR APP_ASSETS_PATH("pictures")
+#define PRESETS_MARK SSTV_DATA_DIR "/.presets1"
+static void install_presets(SstvApp* app) {
+    FileInfo info;
+    if(storage_common_stat(app->storage, PRESETS_MARK, &info) == FSE_OK) return;
+    File* dir = storage_file_alloc(app->storage);
+    if(storage_dir_open(dir, PRESETS_DIR)) {
+        char name[64];
+        FuriString* src = furi_string_alloc();
+        FuriString* dst = furi_string_alloc();
+        while(storage_dir_read(dir, &info, name, sizeof name)) {
+            if(info.flags & FSF_DIRECTORY) continue;
+            furi_string_printf(src, "%s/%s", PRESETS_DIR, name);
+            furi_string_printf(dst, "%s/%s", SSTV_DATA_DIR, name);
+            FileInfo di;
+            if(storage_common_stat(app->storage, furi_string_get_cstr(dst), &di) != FSE_OK)
+                storage_common_copy(app->storage, furi_string_get_cstr(src), furi_string_get_cstr(dst));
+        }
+        furi_string_free(src);
+        furi_string_free(dst);
+    }
+    storage_dir_close(dir);
+    if(storage_file_open(dir, PRESETS_MARK, FSAM_WRITE, FSOM_CREATE_ALWAYS)) storage_file_close(dir);
+    storage_file_free(dir);
+}
+
 /* Lists the .pbm files in the data directory and builds a 40x20 tile for each. */
 static void scan_files(SstvApp* app) {
     app->file_count = 0;
@@ -2451,6 +2481,7 @@ int32_t sftv_app_main(void* p) {
         storage_common_rename(app->storage, SSTV_OLD_DATA_DIR, SSTV_DATA_DIR);
     }
     storage_simply_mkdir(app->storage, SSTV_DATA_DIR);
+    install_presets(app);
     load_user_notes(app);
     scan_files(app);
     run_viewport(app);

@@ -52,6 +52,7 @@ typedef enum {
     StateAnimList, /* flipping through the animations on the card, each one playing; OK packs it */
     StateOptions, /* Calibrate, HF sweep, tone test, About */
     StateAbout, /* how to use it, credits */
+    StateSupport, /* Buy Me a Coffee: text and the QR code */
 } AppState;
 
 typedef enum {
@@ -324,6 +325,7 @@ static void draw_panel(Canvas* canvas, SstvApp* app) {
     case StateAnimList:
     case StateOptions:
     case StateAbout:
+    case StateSupport:
         break;
     case StatePreview:
         canvas_draw_str(canvas, PANEL_X, 9, "Ready");
@@ -560,7 +562,7 @@ static void note_draw_wrapped(Canvas* canvas, const char* text, int x0, int y0, 
 
 /* ---- top menu ---- */
 /* ---- Options and About ---- */
-#define OPT_COUNT 2 /* Calibrate, About (the HF sweep and the audible tone test were developer tools) */
+#define OPT_COUNT 3 /* Calibrate, Support, About (the HF sweep and the audible tone test were developer tools) */
 /* About is one card: name, version, build and a QR code to the project page (the how-to text
  * lives on GitHub). */
 
@@ -945,7 +947,7 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         return;
     }
     if(app->state == StateOptions) {
-        static const char* items[OPT_COUNT] = {"Calibrate", "About"};
+        static const char* items[OPT_COUNT] = {"Calibrate", "Support", "About"};
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str(canvas, 2, 10, "Options");
         canvas_set_font(canvas, FontSecondary);
@@ -958,6 +960,24 @@ static void draw_callback(Canvas* canvas, void* ctx) {
             canvas_draw_str(canvas, 5, y + 9, items[i]);
             canvas_set_color(canvas, ColorBlack);
         }
+        furi_mutex_release(app->mutex);
+        return;
+    }
+    if(app->state == StateSupport) {
+        /* the Buy Me a Coffee page: text on the left, its QR code (58 px, tools/make_coffee_assets.py)
+         * on the right with white around it */
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 2, 11, "Like it?");
+        canvas_set_font(canvas, FontSecondary); /* the column is 62 px: three short lines */
+        canvas_draw_str(canvas, 2, 21, "Support");
+        canvas_draw_str(canvas, 2, 30, "making fun");
+        canvas_draw_str(canvas, 2, 39, "little things.");
+        canvas_draw_rbox(canvas, 0, 43, 62, 21, 3);
+        canvas_set_color(canvas, ColorWhite);
+        canvas_draw_str_aligned(canvas, 31, 53, AlignCenter, AlignBottom, "Buy me");
+        canvas_draw_str_aligned(canvas, 31, 62, AlignCenter, AlignBottom, "a coffee");
+        canvas_set_color(canvas, ColorBlack);
+        canvas_draw_icon(canvas, 128 - 4 - 58, 5, &I_qr_coffee);
         furi_mutex_release(app->mutex);
         return;
     }
@@ -2132,12 +2152,12 @@ static void run_viewport(SstvApp* app) {
                 if(ev.input.type == InputTypeShort && ev.input.key == InputKeyBack) set_state(app, StateMenu);
                 if(ev.input.type == InputTypeShort && ev.input.key == InputKeyOk) {
                     if(app->opt_index == 0) start_calibrate(app);
-                    else set_state(app, StateAbout);
+                    else set_state(app, app->opt_index == 1 ? StateSupport : StateAbout);
                 }
                 view_port_update(app->vp);
                 break;
             }
-            if(app->state == StateAbout) {
+            if(app->state == StateAbout || app->state == StateSupport) {
                 if(ev.input.type == InputTypeShort && ev.input.key == InputKeyBack) set_state(app, StateOptions);
                 view_port_update(app->vp);
                 break;

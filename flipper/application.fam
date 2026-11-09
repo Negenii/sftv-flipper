@@ -9,7 +9,7 @@ App(
     fap_icon="icon_10px.png",
     fap_icon_assets="images",
     fap_file_assets="files", # pictures/: presets copied into the picture folder on first launch
-    fap_version="3.1",
+    fap_version="3.2",
     fap_description="Flipper TV: send a picture (JPEG/PNG/BMP/PBM), a dolphin animation or a note to a Playdate over near-ultrasound",
     fap_private_libs=[
         Lib(
